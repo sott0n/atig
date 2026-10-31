@@ -1,6 +1,6 @@
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
-use crate::agent::AgentTarget;
+use crate::agent::{self, AgentTarget, DispatchEvent};
 use crate::git::{self, DiffEvent, HistoryEvent, HistoryLine};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8,6 +8,7 @@ pub enum InputMode {
     Normal,
     Command,
     Comment,
+    ConfirmSend,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,8 +59,10 @@ pub struct App {
     pub comment_buffer: String,
     pub comment_selected: usize,
     pub agent_target: Option<AgentTarget>,
+    pub dispatching: bool,
     comment_anchor: Option<CommentAnchor>,
     comment_edit_index: Option<usize>,
+    dispatch_rx: Option<Receiver<DispatchEvent>>,
     history_rx: Option<Receiver<HistoryEvent>>,
     diff_rx: Option<Receiver<DiffEvent>>,
     pending_graph: Option<String>,
@@ -87,8 +90,10 @@ impl App {
             comment_buffer: String::new(),
             comment_selected: 0,
             agent_target: None,
+            dispatching: false,
             comment_anchor: None,
             comment_edit_index: None,
+            dispatch_rx: None,
             history_rx: None,
             diff_rx: None,
             pending_graph: None,
@@ -295,6 +300,58 @@ impl App {
             .comment_selected
             .min(self.comments.len().saturating_sub(1));
         self.message = format!("{} review comments", self.comments.len());
+    }
+
+    pub fn request_send_review(&mut self) {
+        if self.dispatching {
+            self.message = "A review is already being delivered".into();
+        } else if self.agent_target.is_none() {
+            self.message = "Set a target with :session <provider> <id>".into();
+        } else if self.comments.is_empty() {
+            self.message = "No review comments to send".into();
+        } else {
+            self.input_mode = InputMode::ConfirmSend;
+        }
+    }
+
+    pub fn cancel_send_review(&mut self) {
+        self.input_mode = InputMode::Normal;
+        self.message = "Review delivery cancelled".into();
+    }
+
+    pub fn confirm_send_review(&mut self) {
+        let Some(target) = self.agent_target.clone() else {
+            self.cancel_send_review();
+            return;
+        };
+        let prompt = format_review_request(&self.comments);
+        let (tx, rx) = mpsc::channel();
+        agent::dispatch(target, prompt, tx);
+        self.dispatch_rx = Some(rx);
+        self.dispatching = true;
+        self.input_mode = InputMode::Normal;
+        self.message = "Review queued for delivery".into();
+    }
+
+    pub fn drain_dispatch_events(&mut self) -> bool {
+        let event = match self.dispatch_rx.as_ref().map(Receiver::try_recv) {
+            Some(Ok(event)) => event,
+            Some(Err(TryRecvError::Empty)) | None => return false,
+            Some(Err(TryRecvError::Disconnected)) => {
+                DispatchEvent::Error("Agent delivery ended unexpectedly".into())
+            }
+        };
+        self.dispatch_rx = None;
+        self.dispatching = false;
+        match event {
+            DispatchEvent::Done => {
+                self.comments.clear();
+                self.comment_selected = 0;
+                self.message = "Review delivered".into();
+            }
+            DispatchEvent::Error(error) => self.message = error,
+        }
+        true
     }
 
     pub fn drain_diff_events(&mut self) -> bool {
@@ -587,6 +644,23 @@ fn parse_hunk_start(line: &str) -> Option<(usize, usize)> {
     ))
 }
 
+fn format_review_request(comments: &[ReviewComment]) -> String {
+    let mut prompt = String::from(
+        "Please address the following code review comments. Use a sub-agent for the implementation when your environment supports it. Inspect the current working tree before editing, make only the requested changes, and run relevant tests. Do not commit or push.\n\n",
+    );
+    for (index, comment) in comments.iter().enumerate() {
+        prompt.push_str(&format!(
+            "{}. Commit: {}\n   Location: {}:{}\n   Comment: {}\n\n",
+            index + 1,
+            comment.commit,
+            comment.file,
+            comment.line,
+            comment.body
+        ));
+    }
+    prompt
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -733,5 +807,26 @@ mod tests {
         app.delete_selected_comment();
         assert!(app.comments.is_empty());
         assert_eq!(app.comment_selected, 0);
+    }
+
+    #[test]
+    fn review_send_requires_comments_and_a_target() {
+        let mut app = App::new();
+        app.request_send_review();
+        assert_eq!(app.input_mode, InputMode::Normal);
+
+        app.agent_target = Some(AgentTarget::parse("codex", "session-1").unwrap());
+        app.comments.push(ReviewComment {
+            commit: "abc123".into(),
+            file: "src/main.rs".into(),
+            line: 4,
+            body: "Handle this error".into(),
+        });
+        app.request_send_review();
+        assert_eq!(app.input_mode, InputMode::ConfirmSend);
+
+        let prompt = format_review_request(&app.comments);
+        assert!(prompt.contains("src/main.rs:4"));
+        assert!(prompt.contains("Handle this error"));
     }
 }

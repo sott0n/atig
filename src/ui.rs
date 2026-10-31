@@ -93,6 +93,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
             frame.set_cursor_position((cursor_x, areas[1].y));
         }
         InputMode::Comment => unreachable!("comments are drawn in the diff view"),
+        InputMode::ConfirmSend => unreachable!("send confirmation is drawn in the review view"),
     }
 }
 
@@ -132,6 +133,10 @@ fn draw_comments(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) 
         .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(Text::from(lines)), areas[0]);
 
+    if app.input_mode == InputMode::ConfirmSend {
+        draw_send_confirmation(frame, app, areas[1]);
+        return;
+    }
     if app.input_mode == InputMode::Comment {
         draw_comment_prompt(frame, app, areas[1]);
         return;
@@ -173,6 +178,24 @@ fn draw_command_prompt(frame: &mut Frame, app: &App, area: ratatui::layout::Rect
     frame.set_cursor_position((cursor_x, area.y));
 }
 
+fn draw_send_confirmation(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let target = app
+        .agent_target
+        .as_ref()
+        .map(|target| target.label())
+        .unwrap_or_else(|| "no target".into());
+    let prompt = format!("Send {} comments to {target}? [y/N]", app.comments.len());
+    frame.render_widget(
+        Paragraph::new(prompt).style(
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        ),
+        area,
+    );
+}
+
 fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
     let height = areas[0].height as usize;
     let start = diff_viewport_start(app, height);
@@ -186,6 +209,10 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
         .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(Text::from(lines)), areas[0]);
 
+    if app.input_mode == InputMode::ConfirmSend {
+        draw_send_confirmation(frame, app, areas[1]);
+        return;
+    }
     if app.input_mode == InputMode::Command {
         draw_command_prompt(frame, app, areas[1]);
         return;
@@ -202,9 +229,10 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
         app.diff_scroll + 1
     };
     let left = format!(
-        "commit {oid} - line {position} of {} - {} comments",
+        "commit {oid} - line {position} of {} - {} comments{}",
         app.diff.len(),
-        app.comments.len()
+        app.comments.len(),
+        if app.dispatching { " - sending" } else { "" }
     );
     let right = if app.diff_loading {
         "loading".to_string()

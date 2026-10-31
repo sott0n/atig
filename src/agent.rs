@@ -1,3 +1,10 @@
+use std::{
+    io::Write,
+    process::{Command, Stdio},
+    sync::mpsc::Sender,
+    thread,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentProvider {
     Codex,
@@ -9,6 +16,79 @@ pub enum AgentProvider {
 pub struct AgentTarget {
     pub provider: AgentProvider,
     pub session_id: String,
+}
+
+pub enum DispatchEvent {
+    Done,
+    Error(String),
+}
+
+pub fn dispatch(target: AgentTarget, prompt: String, sender: Sender<DispatchEvent>) {
+    thread::spawn(move || {
+        let result = match target.provider {
+            AgentProvider::Codex => dispatch_codex(&target.session_id, &prompt),
+            AgentProvider::Claude => dispatch_claude(&target.session_id, &prompt),
+            AgentProvider::Other(_) => {
+                Err("The other provider requires a custom adapter; review was not sent".into())
+            }
+        };
+        let event = match result {
+            Ok(()) => DispatchEvent::Done,
+            Err(error) => DispatchEvent::Error(error),
+        };
+        let _ = sender.send(event);
+    });
+}
+
+fn dispatch_codex(session_id: &str, prompt: &str) -> Result<(), String> {
+    let mut child = Command::new("codex")
+        .args(["exec", "resume", session_id, "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("Failed to start Codex: {error}"))?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| "Failed to open Codex input".to_string())?
+        .write_all(prompt.as_bytes())
+        .map_err(|error| format!("Failed to send review to Codex: {error}"))?;
+    finish_dispatch(child, "Codex")
+}
+
+fn dispatch_claude(session_id: &str, prompt: &str) -> Result<(), String> {
+    let child = Command::new("claude")
+        .args([
+            "-p",
+            "--resume",
+            session_id,
+            "--permission-prompts",
+            "none",
+            prompt,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("Failed to start Claude: {error}"))?;
+    finish_dispatch(child, "Claude")
+}
+
+fn finish_dispatch(child: std::process::Child, name: &str) -> Result<(), String> {
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("Failed to wait for {name}: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr.trim();
+    if stderr.is_empty() {
+        Err(format!("{name} exited with {}", output.status))
+    } else {
+        Err(format!("{name}: {stderr}"))
+    }
 }
 
 impl AgentTarget {

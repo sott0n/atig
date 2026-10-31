@@ -17,6 +17,7 @@ The first development slice provides a streaming Git history view:
 - a adds a review comment to the selected diff line.
 - v opens the comment list; j/k select, e edits, and d deletes comments.
 - :session <codex|claude|other> <id> selects a validated agent session target.
+- S previews and confirms one batched review delivery to the selected session.
 
 ## Development
 

@@ -31,6 +31,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     while !app.should_quit {
         needs_draw |= app.drain_history_events();
         needs_draw |= app.drain_diff_events();
+        needs_draw |= app.drain_dispatch_events();
         if needs_draw {
             terminal.draw(|frame| ui::draw(frame, &app))?;
             needs_draw = false;
@@ -47,6 +48,15 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
             continue;
         }
         needs_draw = true;
+
+        if app.input_mode == InputMode::ConfirmSend {
+            if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+                app.confirm_send_review();
+            } else {
+                app.cancel_send_review();
+            }
+            continue;
+        }
 
         if app.view == View::Comments {
             if app.input_mode == InputMode::Comment {
@@ -68,6 +78,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                     }
                     (KeyCode::Char('e'), KeyModifiers::NONE) => app.edit_selected_comment(),
                     (KeyCode::Char('d'), KeyModifiers::NONE) => app.delete_selected_comment(),
+                    (KeyCode::Char('S'), KeyModifiers::SHIFT) => app.request_send_review(),
                     _ => {}
                 }
             }
@@ -114,6 +125,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 (KeyCode::Char('a'), KeyModifiers::NONE) => app.start_comment(),
                 (KeyCode::Char('v'), KeyModifiers::NONE) => app.open_comments(),
                 (KeyCode::Char(':'), KeyModifiers::NONE) => app.start_command(),
+                (KeyCode::Char('S'), KeyModifiers::SHIFT) => app.request_send_review(),
                 _ => {
                     app.pending_g = false;
                     app.diff_jump_direction = None;
@@ -143,6 +155,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 _ => {}
             },
             InputMode::Comment => unreachable!("comments are only entered in the diff view"),
+            InputMode::ConfirmSend => unreachable!("send confirmation is handled first"),
         }
     }
 
