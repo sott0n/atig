@@ -13,6 +13,7 @@ pub enum InputMode {
 pub enum View {
     History,
     Diff,
+    Comments,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,7 +55,9 @@ pub struct App {
     pub diff_jump_direction: Option<isize>,
     pub comments: Vec<ReviewComment>,
     pub comment_buffer: String,
+    pub comment_selected: usize,
     comment_anchor: Option<CommentAnchor>,
+    comment_edit_index: Option<usize>,
     history_rx: Option<Receiver<HistoryEvent>>,
     diff_rx: Option<Receiver<DiffEvent>>,
     pending_graph: Option<String>,
@@ -80,7 +83,9 @@ impl App {
             diff_jump_direction: None,
             comments: Vec::new(),
             comment_buffer: String::new(),
+            comment_selected: 0,
             comment_anchor: None,
+            comment_edit_index: None,
             history_rx: None,
             diff_rx: None,
             pending_graph: None,
@@ -207,6 +212,7 @@ impl App {
     pub fn cancel_comment(&mut self) {
         self.comment_buffer.clear();
         self.comment_anchor = None;
+        self.comment_edit_index = None;
         self.input_mode = InputMode::Normal;
     }
 
@@ -215,6 +221,15 @@ impl App {
         if body.is_empty() {
             self.message = "Comment was empty".into();
             self.cancel_comment();
+            return;
+        }
+        if let Some(index) = self.comment_edit_index.take() {
+            if let Some(comment) = self.comments.get_mut(index) {
+                comment.body = body;
+            }
+            self.comment_buffer.clear();
+            self.input_mode = InputMode::Normal;
+            self.message = "Comment updated".into();
             return;
         }
         let Some(anchor) = self.comment_anchor.take() else {
@@ -229,6 +244,53 @@ impl App {
         });
         self.comment_buffer.clear();
         self.input_mode = InputMode::Normal;
+        self.message = format!("{} review comments", self.comments.len());
+    }
+
+    pub fn open_comments(&mut self) {
+        self.view = View::Comments;
+        self.comment_selected = self
+            .comment_selected
+            .min(self.comments.len().saturating_sub(1));
+    }
+
+    pub fn close_comments(&mut self) {
+        self.view = View::Diff;
+        self.input_mode = InputMode::Normal;
+        self.comment_buffer.clear();
+        self.comment_edit_index = None;
+    }
+
+    pub fn move_comment_selection(&mut self, amount: isize) {
+        if amount < 0 {
+            self.comment_selected = self.comment_selected.saturating_sub(amount.unsigned_abs());
+        } else {
+            self.comment_selected = self
+                .comment_selected
+                .saturating_add(amount as usize)
+                .min(self.comments.len().saturating_sub(1));
+        }
+    }
+
+    pub fn edit_selected_comment(&mut self) {
+        let Some(comment) = self.comments.get(self.comment_selected) else {
+            self.message = "No comments".into();
+            return;
+        };
+        self.comment_buffer = comment.body.clone();
+        self.comment_edit_index = Some(self.comment_selected);
+        self.input_mode = InputMode::Comment;
+    }
+
+    pub fn delete_selected_comment(&mut self) {
+        if self.comment_selected >= self.comments.len() {
+            self.message = "No comments".into();
+            return;
+        }
+        self.comments.remove(self.comment_selected);
+        self.comment_selected = self
+            .comment_selected
+            .min(self.comments.len().saturating_sub(1));
         self.message = format!("{} review comments", self.comments.len());
     }
 
@@ -617,5 +679,25 @@ mod tests {
             }]
         );
         assert_eq!(app.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn comments_can_be_edited_and_deleted() {
+        let mut app = App::new();
+        app.comments.push(ReviewComment {
+            commit: "abc123".into(),
+            file: "src/main.rs".into(),
+            line: 11,
+            body: "Old body".into(),
+        });
+
+        app.edit_selected_comment();
+        app.comment_buffer = "New body".into();
+        app.submit_comment();
+        assert_eq!(app.comments[0].body, "New body");
+
+        app.delete_selected_comment();
+        assert!(app.comments.is_empty());
+        assert_eq!(app.comment_selected, 0);
     }
 }

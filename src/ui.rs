@@ -19,6 +19,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
         draw_diff(frame, app, &areas);
         return;
     }
+    if app.view == View::Comments {
+        draw_comments(frame, app, &areas);
+        return;
+    }
 
     let viewport_height = areas[0].height as usize;
     let start = viewport_start(app, viewport_height);
@@ -92,6 +96,72 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
 }
 
+fn draw_comments(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
+    let height = areas[0].height as usize;
+    let start = app
+        .comment_selected
+        .saturating_sub((height / 4).max(1))
+        .min(app.comments.len().saturating_sub(height));
+    let lines = app
+        .comments
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(height)
+        .map(|(index, comment)| {
+            let text = format!(
+                "{}:{} [{}] {}",
+                comment.file, comment.line, comment.commit, comment.body
+            );
+            if index == app.comment_selected {
+                let mut line = Line::styled(
+                    text,
+                    Style::default()
+                        .fg(Color::White)
+                        .bg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                );
+                line.push_span(Span::raw(
+                    " ".repeat((areas[0].width as usize).saturating_sub(line.width())),
+                ));
+                line
+            } else {
+                Line::raw(text)
+            }
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(Text::from(lines)), areas[0]);
+
+    if app.input_mode == InputMode::Comment {
+        draw_comment_prompt(frame, app, areas[1]);
+        return;
+    }
+    let status = format!(
+        "Review comments - {} total - j/k move  e edit  d delete  q back",
+        app.comments.len()
+    );
+    frame.render_widget(
+        Paragraph::new(status).style(
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        ),
+        areas[1],
+    );
+}
+
+fn draw_comment_prompt(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let prompt = format!("Comment: {}", app.comment_buffer);
+    frame.render_widget(Paragraph::new(prompt), area);
+    let cursor_x = area
+        .x
+        .saturating_add("Comment: ".len() as u16)
+        .saturating_add(app.comment_buffer.chars().count() as u16)
+        .min(area.right().saturating_sub(1));
+    frame.set_cursor_position((cursor_x, area.y));
+}
+
 fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
     let height = areas[0].height as usize;
     let start = diff_viewport_start(app, height);
@@ -106,14 +176,7 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
     frame.render_widget(Paragraph::new(Text::from(lines)), areas[0]);
 
     if app.input_mode == InputMode::Comment {
-        let prompt = format!("Comment: {}", app.comment_buffer);
-        frame.render_widget(Paragraph::new(prompt), areas[1]);
-        let cursor_x = areas[1]
-            .x
-            .saturating_add("Comment: ".len() as u16)
-            .saturating_add(app.comment_buffer.chars().count() as u16)
-            .min(areas[1].right().saturating_sub(1));
-        frame.set_cursor_position((cursor_x, areas[1].y));
+        draw_comment_prompt(frame, app, areas[1]);
         return;
     }
 

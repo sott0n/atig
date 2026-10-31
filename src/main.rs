@@ -47,6 +47,32 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
         }
         needs_draw = true;
 
+        if app.view == View::Comments {
+            if app.input_mode == InputMode::Comment {
+                match key.code {
+                    KeyCode::Esc => app.cancel_comment(),
+                    KeyCode::Enter => app.submit_comment(),
+                    KeyCode::Backspace => app.comment_backspace(),
+                    KeyCode::Char(character) => app.comment_push(character),
+                    _ => {}
+                }
+            } else {
+                match (key.code, key.modifiers) {
+                    (KeyCode::Esc | KeyCode::Char('q'), KeyModifiers::NONE) => app.close_comments(),
+                    (KeyCode::Char('j') | KeyCode::Down, KeyModifiers::NONE) => {
+                        app.move_comment_selection(1)
+                    }
+                    (KeyCode::Char('k') | KeyCode::Up, KeyModifiers::NONE) => {
+                        app.move_comment_selection(-1)
+                    }
+                    (KeyCode::Char('e'), KeyModifiers::NONE) => app.edit_selected_comment(),
+                    (KeyCode::Char('d'), KeyModifiers::NONE) => app.delete_selected_comment(),
+                    _ => {}
+                }
+            }
+            continue;
+        }
+
         if app.view == View::Diff {
             if app.input_mode == InputMode::Comment {
                 match key.code {
@@ -75,6 +101,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                     app.complete_diff_jump(DiffTarget::Change)
                 }
                 (KeyCode::Char('a'), KeyModifiers::NONE) => app.start_comment(),
+                (KeyCode::Char('v'), KeyModifiers::NONE) => app.open_comments(),
                 _ => {
                     app.pending_g = false;
                     app.diff_jump_direction = None;
