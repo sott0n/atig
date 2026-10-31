@@ -384,7 +384,7 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
 fn agent_target_suffix(app: &App) -> String {
     app.agent_target
         .as_ref()
-        .map(|target| format!(" - target {}", target.short_label()))
+        .map(|target| format!(" - agent session {}", target.short_label()))
         .unwrap_or_default()
 }
 
