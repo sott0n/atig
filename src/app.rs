@@ -14,6 +14,12 @@ pub enum View {
     Diff,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffTarget {
+    File,
+    Change,
+}
+
 pub struct App {
     pub history: Vec<HistoryLine>,
     pub selected: Option<usize>,
@@ -29,6 +35,7 @@ pub struct App {
     pub diff_oid: Option<String>,
     pub diff_loading: bool,
     pub diff_scroll: usize,
+    pub diff_jump_direction: Option<isize>,
     history_rx: Option<Receiver<HistoryEvent>>,
     diff_rx: Option<Receiver<DiffEvent>>,
     pending_graph: Option<String>,
@@ -51,6 +58,7 @@ impl App {
             diff_oid: None,
             diff_loading: false,
             diff_scroll: 0,
+            diff_jump_direction: None,
             history_rx: None,
             diff_rx: None,
             pending_graph: None,
@@ -73,6 +81,7 @@ impl App {
         self.diff_oid = Some(oid);
         self.diff_loading = true;
         self.diff_scroll = 0;
+        self.diff_jump_direction = None;
         self.diff_rx = Some(rx);
         self.message = "Loading commit diff...".into();
     }
@@ -80,6 +89,7 @@ impl App {
     pub fn close_diff(&mut self) {
         self.view = View::History;
         self.pending_g = false;
+        self.diff_jump_direction = None;
         self.diff_rx = None;
         self.diff_loading = false;
     }
@@ -108,6 +118,47 @@ impl App {
     pub fn select_diff_end(&mut self) {
         self.pending_g = false;
         self.diff_scroll = self.diff.len().saturating_sub(1);
+    }
+
+    pub fn begin_diff_jump(&mut self, direction: isize) {
+        self.pending_g = false;
+        self.diff_jump_direction = Some(direction.signum());
+    }
+
+    pub fn complete_diff_jump(&mut self, target: DiffTarget) {
+        let Some(direction) = self.diff_jump_direction.take() else {
+            return;
+        };
+        let matches = |line: &&String| match target {
+            DiffTarget::File => line.starts_with("diff --git "),
+            DiffTarget::Change => line.starts_with("@@"),
+        };
+        let destination = if direction > 0 {
+            self.diff
+                .iter()
+                .enumerate()
+                .skip(self.diff_scroll.saturating_add(1))
+                .find(|(_, line)| matches(line))
+                .map(|(index, _)| index)
+        } else {
+            self.diff[..self.diff_scroll.min(self.diff.len())]
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, line)| matches(line))
+                .map(|(index, _)| index)
+        };
+
+        if let Some(destination) = destination {
+            self.diff_scroll = destination;
+        } else {
+            let direction = if direction > 0 { "next" } else { "previous" };
+            let target = match target {
+                DiffTarget::File => "file",
+                DiffTarget::Change => "change",
+            };
+            self.message = format!("No {direction} {target}");
+        }
     }
 
     pub fn drain_diff_events(&mut self) -> bool {
@@ -385,5 +436,30 @@ mod tests {
 
         app.move_diff(-1);
         assert_eq!(app.diff_scroll, 0);
+    }
+
+    #[test]
+    fn diff_jumps_between_files_and_changes() {
+        let mut app = App::new();
+        app.diff = vec![
+            "commit abc".into(),
+            "diff --git a/one b/one".into(),
+            "@@ -1 +1 @@".into(),
+            "+one".into(),
+            "diff --git a/two b/two".into(),
+            "@@ -2 +2 @@".into(),
+        ];
+
+        app.begin_diff_jump(1);
+        app.complete_diff_jump(DiffTarget::File);
+        assert_eq!(app.diff_scroll, 1);
+
+        app.begin_diff_jump(1);
+        app.complete_diff_jump(DiffTarget::Change);
+        assert_eq!(app.diff_scroll, 2);
+
+        app.begin_diff_jump(-1);
+        app.complete_diff_jump(DiffTarget::File);
+        assert_eq!(app.diff_scroll, 1);
     }
 }

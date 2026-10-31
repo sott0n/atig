@@ -5,7 +5,7 @@ mod ui;
 use std::{io, time::Duration};
 
 use anyhow::Result;
-use app::{App, InputMode, View};
+use app::{App, DiffTarget, InputMode, View};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
@@ -56,7 +56,18 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 (KeyCode::Char('u'), KeyModifiers::CONTROL) => app.move_diff(-10),
                 (KeyCode::Char('G'), KeyModifiers::SHIFT) => app.select_diff_end(),
                 (KeyCode::Char('g'), KeyModifiers::NONE) => app.handle_diff_g(),
-                _ => app.pending_g = false,
+                (KeyCode::Char(']'), KeyModifiers::NONE) => app.begin_diff_jump(1),
+                (KeyCode::Char('['), KeyModifiers::NONE) => app.begin_diff_jump(-1),
+                (KeyCode::Char('f'), KeyModifiers::NONE) => {
+                    app.complete_diff_jump(DiffTarget::File)
+                }
+                (KeyCode::Char('c'), KeyModifiers::NONE) => {
+                    app.complete_diff_jump(DiffTarget::Change)
+                }
+                _ => {
+                    app.pending_g = false;
+                    app.diff_jump_direction = None;
+                }
             }
             continue;
         }
