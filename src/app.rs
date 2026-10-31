@@ -42,10 +42,34 @@ pub struct ReviewThreadMessage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewScope {
+    Commit,
+    File(String),
+    Line { file: String, line: usize },
+}
+
+impl ReviewScope {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Commit => "COMMIT".into(),
+            Self::File(file) => format!("FILE · {file}"),
+            Self::Line { file, line } => format!("LINE · {file}:{line}"),
+        }
+    }
+
+    fn prompt_location(&self) -> String {
+        match self {
+            Self::Commit => "whole commit".into(),
+            Self::File(file) => format!("whole file: {file}"),
+            Self::Line { file, line } => format!("line: {file}:{line}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewComment {
     pub commit: String,
-    pub file: String,
-    pub line: usize,
+    pub scope: ReviewScope,
     pub diff_index: usize,
     pub body: String,
     pub thread: Vec<ReviewThreadMessage>,
@@ -54,8 +78,7 @@ pub struct ReviewComment {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CommentAnchor {
     commit: String,
-    file: String,
-    line: usize,
+    scope: ReviewScope,
     diff_index: usize,
 }
 
@@ -536,10 +559,42 @@ impl App {
         };
         self.comment_anchor = Some(CommentAnchor {
             commit,
-            file,
-            line,
+            scope: ReviewScope::Line { file, line },
             diff_index: self.diff_scroll,
         });
+        self.comment_buffer.clear();
+        self.input_mode = InputMode::Comment;
+    }
+
+    pub fn start_file_comment(&mut self) {
+        let Some((file, diff_index)) = diff_file_anchor(&self.diff, self.diff_scroll) else {
+            self.message = "Select a line inside a changed file".into();
+            return;
+        };
+        let Some(commit) = self.diff_oid.clone() else {
+            return;
+        };
+        self.comment_anchor = Some(CommentAnchor {
+            commit,
+            scope: ReviewScope::File(file),
+            diff_index,
+        });
+        self.diff_scroll = diff_index;
+        self.comment_buffer.clear();
+        self.input_mode = InputMode::Comment;
+    }
+
+    pub fn start_commit_comment(&mut self) {
+        let Some(commit) = self.diff_oid.clone() else {
+            return;
+        };
+        let diff_index = commit_comment_anchor(&self.diff);
+        self.comment_anchor = Some(CommentAnchor {
+            commit,
+            scope: ReviewScope::Commit,
+            diff_index,
+        });
+        self.diff_scroll = diff_index;
         self.comment_buffer.clear();
         self.input_mode = InputMode::Comment;
     }
@@ -597,8 +652,7 @@ impl App {
         let comment_index = self.comments.len();
         self.comments.push(ReviewComment {
             commit: anchor.commit,
-            file: anchor.file,
-            line: anchor.line,
+            scope: anchor.scope,
             diff_index: anchor.diff_index,
             body,
             thread: Vec::new(),
@@ -666,6 +720,18 @@ impl App {
 
     pub fn followup_comment_index(&self) -> Option<usize> {
         self.comment_followup_index
+    }
+
+    pub fn comment_scope_label(&self) -> Option<String> {
+        self.comment_anchor
+            .as_ref()
+            .map(|anchor| anchor.scope.label())
+            .or_else(|| {
+                self.comment_edit_index
+                    .or(self.comment_followup_index)
+                    .and_then(|index| self.comments.get(index))
+                    .map(|comment| comment.scope.label())
+            })
     }
 
     pub fn delete_selected_comment(&mut self) {
@@ -1118,6 +1184,30 @@ fn diff_location(diff: &[String], cursor: usize) -> Option<(String, usize)> {
     None
 }
 
+fn diff_file_anchor(diff: &[String], cursor: usize) -> Option<(String, usize)> {
+    let anchor = (0..=cursor.min(diff.len().saturating_sub(1)))
+        .rev()
+        .find(|&index| diff[index].starts_with("diff --git "))?;
+    let end = ((anchor + 1)..diff.len())
+        .find(|&index| diff[index].starts_with("diff --git "))
+        .unwrap_or(diff.len());
+    let file = diff[anchor..end]
+        .iter()
+        .find_map(|line| {
+            line.strip_prefix("+++ b/")
+                .or_else(|| line.strip_prefix("--- a/"))
+        })
+        .or_else(|| diff[anchor].rsplit_once(" b/").map(|(_, path)| path))?;
+    Some((file.to_string(), anchor))
+}
+
+fn commit_comment_anchor(diff: &[String]) -> usize {
+    diff.iter()
+        .position(|line| line.starts_with("diff --git "))
+        .map(|index| index.saturating_sub(1))
+        .unwrap_or_else(|| diff.len().saturating_sub(1))
+}
+
 fn find_wrapped(
     length: usize,
     current: usize,
@@ -1156,11 +1246,10 @@ fn format_review_request(comments: &[ReviewComment]) -> String {
     );
     for (index, comment) in comments.iter().enumerate() {
         prompt.push_str(&format!(
-            "{}. Commit: {}\n   Location: {}:{}\n   Human review: {}\n",
+            "{}. Commit: {}\n   Scope: {}\n   Human review: {}\n",
             index + 1,
             comment.commit,
-            comment.file,
-            comment.line,
+            comment.scope.prompt_location(),
             comment.body
         ));
         for message in &comment.thread {
@@ -1277,8 +1366,10 @@ mod tests {
         app.diff = vec!["line one".into(), "line two".into()];
         app.comments = vec![ReviewComment {
             commit: "abc123".into(),
-            file: "src/main.rs".into(),
-            line: 1,
+            scope: ReviewScope::Line {
+                file: "src/main.rs".into(),
+                line: 1,
+            },
             diff_index: 0,
             body: "Please simplify".into(),
             thread: Vec::new(),
@@ -1310,8 +1401,10 @@ mod tests {
         app.diff = vec!["+changed".into()];
         app.comments = vec![ReviewComment {
             commit: "abc123".into(),
-            file: "src/main.rs".into(),
-            line: 1,
+            scope: ReviewScope::Line {
+                file: "src/main.rs".into(),
+                line: 1,
+            },
             diff_index: 0,
             body: "Please simplify".into(),
             thread: vec![ReviewThreadMessage {
@@ -1411,8 +1504,10 @@ mod tests {
             app.comments,
             [ReviewComment {
                 commit: "abc123".into(),
-                file: "src/main.rs".into(),
-                line: 11,
+                scope: ReviewScope::Line {
+                    file: "src/main.rs".into(),
+                    line: 11,
+                },
                 diff_index: 5,
                 body: "Please simplify".into(),
                 thread: Vec::new(),
@@ -1422,12 +1517,60 @@ mod tests {
     }
 
     #[test]
+    fn file_and_commit_comments_use_scope_specific_anchors() {
+        let mut app = App::new();
+        app.diff_oid = Some("abc123".into());
+        app.diff = vec![
+            "commit abc123".into(),
+            "Author: A".into(),
+            "".into(),
+            "    subject".into(),
+            "".into(),
+            "diff --git a/src/main.rs b/src/main.rs".into(),
+            "--- a/src/main.rs".into(),
+            "+++ b/src/main.rs".into(),
+            "@@ -1 +1 @@".into(),
+            "+changed".into(),
+        ];
+
+        app.diff_scroll = 9;
+        app.start_file_comment();
+        assert_eq!(app.diff_scroll, 5);
+        assert_eq!(
+            app.comment_scope_label().as_deref(),
+            Some("FILE · src/main.rs")
+        );
+        app.comment_buffer = "Review the file structure".into();
+        app.submit_comment();
+
+        app.start_commit_comment();
+        assert_eq!(app.diff_scroll, 4);
+        assert_eq!(app.comment_scope_label().as_deref(), Some("COMMIT"));
+        app.comment_buffer = "Review the overall approach".into();
+        app.submit_comment();
+
+        assert_eq!(
+            app.comments[0].scope,
+            ReviewScope::File("src/main.rs".into())
+        );
+        assert_eq!(app.comments[0].diff_index, 5);
+        assert_eq!(app.comments[1].scope, ReviewScope::Commit);
+        assert_eq!(app.comments[1].diff_index, 4);
+
+        let prompt = format_review_request(&app.comments);
+        assert!(prompt.contains("Scope: whole file: src/main.rs"));
+        assert!(prompt.contains("Scope: whole commit"));
+    }
+
+    #[test]
     fn comments_can_be_edited_and_deleted() {
         let mut app = App::new();
         app.comments.push(ReviewComment {
             commit: "abc123".into(),
-            file: "src/main.rs".into(),
-            line: 11,
+            scope: ReviewScope::Line {
+                file: "src/main.rs".into(),
+                line: 11,
+            },
             diff_index: 5,
             body: "Old body".into(),
             thread: Vec::new(),
@@ -1456,8 +1599,10 @@ mod tests {
         app.agent_target = Some(AgentTarget::parse("codex", "session-1").unwrap());
         app.comments.push(ReviewComment {
             commit: "abc123".into(),
-            file: "src/main.rs".into(),
-            line: 4,
+            scope: ReviewScope::Line {
+                file: "src/main.rs".into(),
+                line: 4,
+            },
             diff_index: 3,
             body: "Handle this error".into(),
             thread: Vec::new(),
@@ -1478,16 +1623,20 @@ mod tests {
         app.comments = vec![
             ReviewComment {
                 commit: "abc123".into(),
-                file: "src/main.rs".into(),
-                line: 4,
+                scope: ReviewScope::Line {
+                    file: "src/main.rs".into(),
+                    line: 4,
+                },
                 diff_index: 3,
                 body: "First comment".into(),
                 thread: Vec::new(),
             },
             ReviewComment {
                 commit: "abc123".into(),
-                file: "src/main.rs".into(),
-                line: 8,
+                scope: ReviewScope::Line {
+                    file: "src/main.rs".into(),
+                    line: 8,
+                },
                 diff_index: 7,
                 body: "Second comment".into(),
                 thread: Vec::new(),
@@ -1509,8 +1658,10 @@ mod tests {
         let mut app = App::new();
         let delivered = ReviewComment {
             commit: "abc123".into(),
-            file: "src/main.rs".into(),
-            line: 4,
+            scope: ReviewScope::Line {
+                file: "src/main.rs".into(),
+                line: 4,
+            },
             diff_index: 3,
             body: "Delivered".into(),
             thread: Vec::new(),

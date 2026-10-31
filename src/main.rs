@@ -187,6 +187,8 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 (KeyCode::Tab, _) => app.jump_diff(DiffTarget::File, 1),
                 (KeyCode::BackTab, _) => app.jump_diff(DiffTarget::File, -1),
                 (KeyCode::Char('a'), KeyModifiers::NONE) => app.start_comment(),
+                (KeyCode::Char('F'), KeyModifiers::SHIFT) => app.start_file_comment(),
+                (KeyCode::Char('C'), KeyModifiers::SHIFT) => app.start_commit_comment(),
                 (KeyCode::Enter, KeyModifiers::NONE) => app.edit_inline_comment(),
                 (KeyCode::Char('v'), KeyModifiers::NONE) => app.open_comments(),
                 (KeyCode::Char(':'), KeyModifiers::NONE) => app.start_command(),

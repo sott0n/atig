@@ -125,6 +125,7 @@ fn draw_help(frame: &mut Frame, areas: &[ratatui::layout::Rect]) {
         "/, n, N           search / next / previous",
         "r                 reload",
         "a                 add review comment",
+        "F / C             review file / commit",
         "v                 view review comments",
         "s                 select an agent session",
         "S                 send review comments",
@@ -222,8 +223,10 @@ fn draw_comments(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) 
         .take(height)
         .map(|(index, comment)| {
             let text = format!(
-                "{}:{} [{}] {}",
-                comment.file, comment.line, comment.commit, comment.body
+                "{} [{}] {}",
+                comment.scope.label(),
+                comment.commit,
+                comment.body
             );
             if index == app.comment_selected {
                 let mut line = Line::styled(
@@ -357,6 +360,7 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
                 &app.comment_buffer,
                 app.editing_comment_index().is_some(),
                 false,
+                app.comment_scope_label().as_deref(),
                 areas[0].width as usize,
             ));
         }
@@ -374,6 +378,7 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
                     &app.comment_buffer,
                     false,
                     true,
+                    app.comment_scope_label().as_deref(),
                     areas[0].width as usize,
                 ));
             }
@@ -395,12 +400,10 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
         return;
     }
     if app.input_mode == InputMode::Comment {
-        let status = format!(
-            "Reviewing line {} of {}{}",
-            app.diff_scroll + 1,
-            app.diff.len(),
-            agent_target_suffix(app)
-        );
+        let target = app
+            .comment_scope_label()
+            .unwrap_or_else(|| format!("LINE {}", app.diff_scroll + 1));
+        let status = format!("Writing {target} review{}", agent_target_suffix(app));
         frame.render_widget(
             Paragraph::new(status).style(
                 Style::default()
@@ -527,7 +530,7 @@ fn saved_comment_box(
             Style::default().fg(root_color).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!(" · {}:{}", comment.file, comment.line),
+            format!(" · {}", comment.scope.label()),
             Style::default().fg(Color::DarkGray),
         ),
     ])];
@@ -590,6 +593,7 @@ fn inline_comment_box(
     buffer: &str,
     editing: bool,
     followup: bool,
+    scope: Option<&str>,
     width: usize,
 ) -> Vec<Line<'static>> {
     let accent = Style::default().fg(Color::Green);
@@ -599,13 +603,17 @@ fn inline_comment_box(
         Line::from(vec![
             Span::styled("  ▶ ", accent),
             Span::styled(
-                if followup {
-                    "REPLY TO AGENT"
-                } else if editing {
-                    "Edit review comment"
-                } else {
-                    "NEW REVIEW"
-                },
+                format!(
+                    "{}{}",
+                    if followup {
+                        "REPLY TO AGENT"
+                    } else if editing {
+                        "EDIT REVIEW"
+                    } else {
+                        "NEW REVIEW"
+                    },
+                    scope.map(|scope| format!(" · {scope}")).unwrap_or_default()
+                ),
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
@@ -884,7 +892,13 @@ mod tests {
 
     #[test]
     fn inline_comment_editor_uses_compact_accent_lines() {
-        let rendered = inline_comment_box("Please simplify this", false, false, 60);
+        let rendered = inline_comment_box(
+            "Please simplify this",
+            false,
+            false,
+            Some("LINE · src/main.rs:12"),
+            60,
+        );
 
         assert_eq!(rendered.len(), 3);
         assert!(
@@ -892,7 +906,11 @@ mod tests {
                 .iter()
                 .all(|line| line.to_string().starts_with("  "))
         );
-        assert!(rendered[0].to_string().contains("NEW REVIEW"));
+        assert!(
+            rendered[0]
+                .to_string()
+                .contains("NEW REVIEW · LINE · src/main.rs:12")
+        );
         assert!(rendered[1].to_string().contains("Please simplify this"));
         assert!(
             rendered[2]
@@ -905,8 +923,10 @@ mod tests {
     fn saved_comment_card_wraps_with_location_header() {
         let comment = ReviewComment {
             commit: "abc123".into(),
-            file: "src/main.rs".into(),
-            line: 12,
+            scope: crate::app::ReviewScope::Line {
+                file: "src/main.rs".into(),
+                line: 12,
+            },
             diff_index: 5,
             body: "This comment is long enough to wrap".into(),
             thread: Vec::new(),
@@ -923,7 +943,7 @@ mod tests {
         assert!(
             rendered[0]
                 .to_string()
-                .contains("REVIEW 01 · src/main.rs:12")
+                .contains("REVIEW 01 · LINE · src/main.rs:12")
         );
     }
 
@@ -936,8 +956,10 @@ mod tests {
     fn agent_reply_is_rendered_below_its_comment() {
         let comment = ReviewComment {
             commit: "abc123".into(),
-            file: "src/main.rs".into(),
-            line: 12,
+            scope: crate::app::ReviewScope::Line {
+                file: "src/main.rs".into(),
+                line: 12,
+            },
             diff_index: 5,
             body: "Please simplify".into(),
             thread: vec![crate::app::ReviewThreadMessage {
@@ -960,7 +982,13 @@ mod tests {
 
     #[test]
     fn agent_follow_up_editor_names_the_thread_action() {
-        let rendered = inline_comment_box("One more change", false, true, 60);
+        let rendered = inline_comment_box(
+            "One more change",
+            false,
+            true,
+            Some("LINE · src/main.rs:12"),
+            60,
+        );
         let text = rendered
             .iter()
             .map(Line::to_string)

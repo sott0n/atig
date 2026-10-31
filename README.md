@@ -110,6 +110,8 @@ the selected agent session.
 | `/` | Search diff text |
 | `n`, `N` | Repeat the search forward or backward |
 | `a` | Add a comment to the selected diff line |
+| `F` | Add a comment for the current file |
+| `C` | Add a comment for the whole commit |
 | `Enter` | Edit a review comment, or reply to a selected thread message |
 | `v` | Open the review comment list |
 | `S` | Send the selected inline comment, or all comments when a code line is selected |
@@ -178,6 +180,8 @@ Git revision arguments are passed directly to `git log`. For example:
 
 When an inline comment is selected, `S` sends that comment alone. When a code
 line is selected, `S` sends all accumulated comments as one review request.
+Comments can target a specific line (`a`), the current file (`F`), or the
+whole commit (`C`); that scope is included explicitly in the Agent request.
 The request asks the target agent to use a sub-agent when supported, make only
 the reviewed changes, run relevant tests, and avoid committing or pushing.
 Sub-agent creation is ultimately controlled by the target agent and its
