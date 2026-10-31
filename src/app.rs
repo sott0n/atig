@@ -308,6 +308,20 @@ impl App {
         }
     }
 
+    pub fn jump_diff(&mut self, target: DiffTarget, direction: isize) {
+        self.begin_diff_jump(direction);
+        self.complete_diff_jump(target);
+    }
+
+    pub fn go_to_diff_line(&mut self, line: usize) {
+        if self.diff.is_empty() {
+            self.message = "No diff lines".into();
+            return;
+        }
+        self.diff_scroll = line.saturating_sub(1).min(self.diff.len() - 1);
+        self.message = format!("Line {}", self.diff_scroll + 1);
+    }
+
     pub fn start_comment(&mut self) {
         let Some((file, line)) = diff_location(&self.diff, self.diff_scroll) else {
             self.message = "Select an added, removed, or context line".into();
@@ -661,6 +675,19 @@ impl App {
                 }
                 _ => self.message = "Usage: :session <codex|claude|other> <id>".into(),
             },
+            Some("goto") => match (parts.next(), parts.next()) {
+                (Some(line), None) if self.view == View::Diff => match line.parse::<usize>() {
+                    Ok(line) if line > 0 => self.go_to_diff_line(line),
+                    _ => self.message = "Usage: :goto <positive-line-number>".into(),
+                },
+                _ => self.message = "Usage: :goto <line> (diff view only)".into(),
+            },
+            Some("next-file") if self.view == View::Diff => self.jump_diff(DiffTarget::File, 1),
+            Some("prev-file") if self.view == View::Diff => self.jump_diff(DiffTarget::File, -1),
+            Some("next-change") if self.view == View::Diff => self.jump_diff(DiffTarget::Change, 1),
+            Some("prev-change") if self.view == View::Diff => {
+                self.jump_diff(DiffTarget::Change, -1)
+            }
             Some("help") => {
                 self.open_help();
             }
@@ -908,6 +935,26 @@ mod tests {
         app.begin_diff_jump(-1);
         app.complete_diff_jump(DiffTarget::File);
         assert_eq!(app.diff_scroll, 1);
+
+        app.jump_diff(DiffTarget::Change, 1);
+        assert_eq!(app.diff_scroll, 2);
+    }
+
+    #[test]
+    fn goto_command_uses_one_based_diff_lines_and_clamps() {
+        let mut app = App::new();
+        app.view = View::Diff;
+        app.diff = (1..=20).map(|line| line.to_string()).collect();
+        app.input_mode = InputMode::Command;
+        app.command = "goto 12".into();
+
+        app.submit_command();
+        assert_eq!(app.diff_scroll, 11);
+
+        app.input_mode = InputMode::Command;
+        app.command = "goto 999".into();
+        app.submit_command();
+        assert_eq!(app.diff_scroll, 19);
     }
 
     #[test]

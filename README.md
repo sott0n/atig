@@ -20,6 +20,8 @@ The first development slice provides a streaming Git history view:
 - :session <codex|claude|other> <id> selects a validated agent session target.
 - S previews and confirms one batched review delivery to the selected session.
 - / searches, n/N repeat, r reloads, and ? opens the key reference.
+- Diff navigation supports half/full pages, 10-line jumps, direct file/hunk jumps,
+  and :goto <line>.
 
 ## Development
 

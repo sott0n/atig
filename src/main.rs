@@ -128,14 +128,30 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 }
                 continue;
             }
+            let (_, terminal_height) = crossterm::terminal::size()?;
+            let page = terminal_height.saturating_sub(1).max(1) as isize;
+            let half_page = (page / 2).max(1);
             match (key.code, key.modifiers) {
                 (KeyCode::Esc | KeyCode::Char('q'), KeyModifiers::NONE) => app.close_diff(),
                 (KeyCode::Char('j') | KeyCode::Down, KeyModifiers::NONE) => app.move_diff(1),
                 (KeyCode::Char('k') | KeyCode::Up, KeyModifiers::NONE) => app.move_diff(-1),
-                (KeyCode::Char('d'), KeyModifiers::CONTROL) => app.move_diff(10),
-                (KeyCode::Char('u'), KeyModifiers::CONTROL) => app.move_diff(-10),
+                (KeyCode::Char('J'), KeyModifiers::SHIFT) => app.move_diff(10),
+                (KeyCode::Char('K'), KeyModifiers::SHIFT) => app.move_diff(-10),
+                (KeyCode::Char('d'), KeyModifiers::CONTROL) => app.move_diff(half_page),
+                (KeyCode::Char('u'), KeyModifiers::CONTROL) => app.move_diff(-half_page),
+                (KeyCode::Char('f'), KeyModifiers::CONTROL) | (KeyCode::PageDown, _) => {
+                    app.move_diff(page)
+                }
+                (KeyCode::Char('b'), KeyModifiers::CONTROL) | (KeyCode::PageUp, _) => {
+                    app.move_diff(-page)
+                }
                 (KeyCode::Char('G'), KeyModifiers::SHIFT) => app.select_diff_end(),
                 (KeyCode::Char('g'), KeyModifiers::NONE) => app.handle_diff_g(),
+                (KeyCode::Home, _) => {
+                    app.diff_scroll = 0;
+                    app.pending_g = false;
+                }
+                (KeyCode::End, _) => app.select_diff_end(),
                 (KeyCode::Char(']'), KeyModifiers::NONE) => app.begin_diff_jump(1),
                 (KeyCode::Char('['), KeyModifiers::NONE) => app.begin_diff_jump(-1),
                 (KeyCode::Char('f'), KeyModifiers::NONE) => {
@@ -144,6 +160,10 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 (KeyCode::Char('c'), KeyModifiers::NONE) => {
                     app.complete_diff_jump(DiffTarget::Change)
                 }
+                (KeyCode::Char('}'), _) => app.jump_diff(DiffTarget::Change, 1),
+                (KeyCode::Char('{'), _) => app.jump_diff(DiffTarget::Change, -1),
+                (KeyCode::Tab, _) => app.jump_diff(DiffTarget::File, 1),
+                (KeyCode::BackTab, _) => app.jump_diff(DiffTarget::File, -1),
                 (KeyCode::Char('a'), KeyModifiers::NONE) => app.start_comment(),
                 (KeyCode::Char('v'), KeyModifiers::NONE) => app.open_comments(),
                 (KeyCode::Char(':'), KeyModifiers::NONE) => app.start_command(),
