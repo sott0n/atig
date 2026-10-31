@@ -2,78 +2,191 @@ use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
-    text::{Line, Text},
-    widgets::{Block, Borders, Paragraph},
+    text::{Line, Span, Text},
+    widgets::Paragraph,
 };
 
 use crate::app::{App, InputMode};
+use crate::git::{CommitLine, HistoryLine, fit_column, format_refs};
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let areas = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(frame.area());
 
-    let viewport_height = areas[0].height.saturating_sub(2) as usize;
+    let viewport_height = areas[0].height as usize;
     let start = viewport_start(app, viewport_height);
     let end = (start + viewport_height).min(app.history.len());
+    let author_width = app
+        .history
+        .iter()
+        .filter_map(|line| line.commit())
+        .map(|commit| commit.author.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(20);
     let lines = app.history[start..end]
         .iter()
         .enumerate()
         .map(|(offset, line)| {
             let index = start + offset;
-            let style = if app.selected == Some(index) {
-                Style::default()
-                    .bg(Color::Blue)
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD)
-            } else if line.commit().is_some() {
-                Style::default().fg(Color::White)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-            Line::styled(line.display_text(), style)
+            history_line(
+                line,
+                author_width,
+                app.selected == Some(index),
+                areas[0].width as usize,
+            )
         })
         .collect::<Vec<_>>();
 
-    let title = if app.loading {
-        " atig [loading] "
-    } else {
-        " atig "
-    };
-    frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .block(Block::default().borders(Borders::ALL).title(title)),
-        areas[0],
-    );
-
-    frame.render_widget(
-        Paragraph::new(app.message.as_str()).style(Style::default().fg(Color::DarkGray)),
-        areas[1],
-    );
+    frame.render_widget(Paragraph::new(Text::from(lines)), areas[0]);
 
     match app.input_mode {
         InputMode::Normal => {
+            let oid = app
+                .selected
+                .and_then(|selected| app.history[selected].commit())
+                .map(|commit| commit.oid.as_str())
+                .unwrap_or("-");
+            let position = app.selected_commit_position().unwrap_or(0);
+            let total = app.commit_count();
+            let left = if total == 0 && !app.loading {
+                app.message.clone()
+            } else {
+                format!(
+                    "[{}] {oid} - commit {position} of {total}",
+                    app.current_branch()
+                )
+            };
+            let right = if app.loading { "loading" } else { "100%" };
+            let available = areas[1].width as usize;
+            let gap = available.saturating_sub(left.chars().count() + right.len());
+            let status = format!("{left}{}{right}", " ".repeat(gap));
             frame.render_widget(
-                Paragraph::new("j/k move  gg/G ends  Ctrl-d/u page  : command  q quit")
-                    .style(Style::default().fg(Color::DarkGray)),
-                areas[2],
+                Paragraph::new(status).style(
+                    Style::default()
+                        .fg(Color::White)
+                        .bg(Color::Blue)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                areas[1],
             );
         }
         InputMode::Command => {
             let prompt = format!(":{}", app.command);
-            frame.render_widget(Paragraph::new(prompt.as_str()), areas[2]);
-            let cursor_x = areas[2]
+            frame.render_widget(Paragraph::new(prompt.as_str()), areas[1]);
+            let cursor_x = areas[1]
                 .x
                 .saturating_add(1)
                 .saturating_add(app.command.chars().count() as u16)
-                .min(areas[2].right().saturating_sub(1));
-            frame.set_cursor_position((cursor_x, areas[2].y));
+                .min(areas[1].right().saturating_sub(1));
+            frame.set_cursor_position((cursor_x, areas[1].y));
         }
+    }
+}
+
+fn history_line(
+    line: &HistoryLine,
+    author_width: usize,
+    selected: bool,
+    viewport_width: usize,
+) -> Line<'static> {
+    if selected {
+        let mut rendered = Line::styled(
+            line.display_text(author_width),
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        );
+        let padding = viewport_width.saturating_sub(rendered.width());
+        rendered.push_span(Span::raw(" ".repeat(padding)));
+        return rendered;
+    }
+
+    let HistoryLine::Commit(commit) = line else {
+        return Line::styled(
+            line.display_text(author_width),
+            Style::default().fg(Color::DarkGray),
+        );
+    };
+
+    let mut spans = vec![
+        Span::styled(commit.date.clone(), Style::default().fg(Color::Blue)),
+        Span::raw(" "),
+        Span::styled(
+            fit_column(&commit.author, author_width),
+            Style::default().fg(Color::Green),
+        ),
+        Span::raw(" "),
+    ];
+    spans.extend(graph_spans(commit));
+
+    let refs = format_refs(&commit.refs);
+    if !refs.is_empty() {
+        let modifier = if commit.refs.contains("HEAD -> ") {
+            Modifier::BOLD
+        } else {
+            Modifier::empty()
+        };
+        spans.push(Span::styled(
+            refs,
+            Style::default()
+                .fg(ref_color(&commit.refs))
+                .add_modifier(modifier),
+        ));
+        spans.push(Span::raw(" "));
+    }
+    spans.push(Span::raw(commit.subject.clone()));
+    Line::from(spans)
+}
+
+fn graph_spans(commit: &CommitLine) -> Vec<Span<'static>> {
+    const LANE_COLORS: [Color; 6] = [
+        Color::Magenta,
+        Color::Yellow,
+        Color::Cyan,
+        Color::Green,
+        Color::White,
+        Color::Red,
+    ];
+
+    commit
+        .tig_graph()
+        .chars()
+        .enumerate()
+        .map(|(index, character)| {
+            let color = if matches!(character, 'M' | 'o' | 'I') {
+                None
+            } else if character == ' ' {
+                return Span::raw(" ");
+            } else {
+                let lane = if matches!(character, '─' | '┐' | '┘') {
+                    (index / 2).max(1)
+                } else {
+                    index / 2
+                };
+                Some(LANE_COLORS[lane % LANE_COLORS.len()])
+            };
+            Span::styled(
+                character.to_string(),
+                Style::default().fg(color.unwrap_or(Color::Blue)),
+            )
+        })
+        .collect()
+}
+
+fn ref_color(refs: &str) -> Color {
+    if refs
+        .split(", ")
+        .any(|reference| reference.starts_with("tag: "))
+    {
+        Color::Magenta
+    } else if refs.split(", ").any(|reference| reference.contains('/')) {
+        Color::Yellow
+    } else {
+        Color::Cyan
     }
 }
 
@@ -92,6 +205,7 @@ fn viewport_start(app: &App, height: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::parse_history_line;
 
     #[test]
     fn viewport_follows_selection_without_exceeding_history() {
@@ -102,5 +216,37 @@ mod tests {
         app.selected = Some(18);
 
         assert_eq!(viewport_start(&app, 8), 12);
+    }
+
+    #[test]
+    fn unselected_history_line_uses_tig_column_colors() {
+        let line = parse_history_line(
+            "* \u{1e}012345\u{1f}012345\u{1f}parent\u{1f}2026-11-01 10:30 +0900\u{1f}Alice\u{1f}HEAD -> main\u{1f}Initial commit",
+        );
+
+        let rendered = history_line(&line, 8, false, 100);
+
+        assert_eq!(rendered.spans[0].style.fg, Some(Color::Blue));
+        assert_eq!(rendered.spans[2].style.fg, Some(Color::Green));
+        assert!(
+            rendered
+                .spans
+                .iter()
+                .any(|span| span.style.fg == Some(Color::Cyan))
+        );
+    }
+
+    #[test]
+    fn selected_history_line_matches_tig_cursor_style() {
+        let line = parse_history_line(
+            "* \u{1e}012345\u{1f}012345\u{1f}parent\u{1f}2026-11-01 10:30 +0900\u{1f}Alice\u{1f}\u{1f}Initial commit",
+        );
+
+        let rendered = history_line(&line, 8, true, 100);
+
+        assert_eq!(rendered.style.fg, Some(Color::White));
+        assert_eq!(rendered.style.bg, Some(Color::Green));
+        assert!(rendered.style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(rendered.width(), 100);
     }
 }

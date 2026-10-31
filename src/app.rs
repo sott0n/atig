@@ -19,6 +19,7 @@ pub struct App {
     pub pending_g: bool,
     pub revisions: Vec<String>,
     history_rx: Option<Receiver<HistoryEvent>>,
+    pending_graph: Option<String>,
 }
 
 impl App {
@@ -34,6 +35,7 @@ impl App {
             pending_g: false,
             revisions: Vec::new(),
             history_rx: None,
+            pending_graph: None,
         }
     }
 
@@ -42,6 +44,7 @@ impl App {
         git::stream_history(self.revisions.clone(), tx);
         self.history.clear();
         self.selected = None;
+        self.pending_graph = None;
         self.history_rx = Some(rx);
         self.loading = true;
         self.message = if self.revisions.is_empty() {
@@ -67,12 +70,16 @@ impl App {
             changed = true;
 
             match event {
-                HistoryEvent::Line(line) => {
+                HistoryEvent::Line(HistoryLine::Commit(mut commit)) => {
+                    commit.preceding_graph = self.pending_graph.take();
                     let index = self.history.len();
-                    if self.selected.is_none() && line.commit().is_some() {
+                    if self.selected.is_none() {
                         self.selected = Some(index);
                     }
-                    self.history.push(line);
+                    self.history.push(HistoryLine::Commit(commit));
+                }
+                HistoryEvent::Line(HistoryLine::Graph(graph)) => {
+                    self.pending_graph = Some(graph);
                 }
                 HistoryEvent::Done => {
                     self.loading = false;
@@ -188,6 +195,25 @@ impl App {
             .count()
     }
 
+    pub fn current_branch(&self) -> &str {
+        self.history
+            .iter()
+            .filter_map(HistoryLine::commit)
+            .flat_map(|commit| commit.refs.split(", "))
+            .find_map(|reference| reference.strip_prefix("HEAD -> "))
+            .unwrap_or("HEAD")
+    }
+
+    pub fn selected_commit_position(&self) -> Option<usize> {
+        let selected = self.selected?;
+        Some(
+            self.history[..=selected]
+                .iter()
+                .filter(|line| line.commit().is_some())
+                .count(),
+        )
+    }
+
     fn next_commit_index(&self, current: usize, direction: isize) -> Option<usize> {
         if direction > 0 {
             ((current + 1)..self.history.len())
@@ -208,9 +234,13 @@ mod tests {
     fn app_with_history() -> App {
         let mut app = App::new();
         app.history = vec![
-            parse_history_line("* \u{1e}a\u{1f}a\u{1f}2026-01-01\u{1f}\u{1f}one"),
+            parse_history_line(
+                "* \u{1e}a\u{1f}a\u{1f}parent\u{1f}2026-01-01 00:00 +0000\u{1f}Alice\u{1f}\u{1f}one",
+            ),
             parse_history_line("|\\"),
-            parse_history_line("| * \u{1e}b\u{1f}b\u{1f}2026-01-02\u{1f}\u{1f}two"),
+            parse_history_line(
+                "| * \u{1e}b\u{1f}b\u{1f}parent\u{1f}2026-01-02 00:00 +0000\u{1f}Bob\u{1f}\u{1f}two",
+            ),
         ];
         app.select_first();
         app

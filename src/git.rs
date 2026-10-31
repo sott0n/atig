@@ -7,16 +7,20 @@ use std::{
 
 const RECORD_SEPARATOR: char = '\u{1e}';
 const FIELD_SEPARATOR: char = '\u{1f}';
-const LOG_FORMAT: &str = "%x1e%H%x1f%h%x1f%ad%x1f%D%x1f%s";
+const LOG_FORMAT: &str = "%x1e%H%x1f%h%x1f%P%x1f%ad%x1f%aN%x1f%D%x1f%s";
+const DATE_WIDTH: usize = 22;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitLine {
     pub graph: String,
     pub oid: String,
     pub short_oid: String,
+    pub parents: Vec<String>,
     pub date: String,
+    pub author: String,
     pub refs: String,
     pub subject: String,
+    pub preceding_graph: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,21 +37,71 @@ impl HistoryLine {
         }
     }
 
-    pub fn display_text(&self) -> String {
+    pub fn display_text(&self, author_width: usize) -> String {
         match self {
-            Self::Graph(graph) => graph.clone(),
+            Self::Graph(graph) => {
+                format!("{}{}", " ".repeat(DATE_WIDTH + author_width + 2), graph)
+            }
             Self::Commit(commit) => {
-                let refs = if commit.refs.is_empty() {
+                let author = fit_column(&commit.author, author_width);
+                let refs = format_refs(&commit.refs);
+                let refs = if refs.is_empty() {
                     String::new()
                 } else {
-                    format!(" ({})", commit.refs)
+                    format!("{refs} ")
                 };
                 format!(
-                    "{}{} {}{} {}",
-                    commit.graph, commit.short_oid, commit.date, refs, commit.subject
+                    "{} {} {}{}{}",
+                    commit.date,
+                    author,
+                    commit.tig_graph(),
+                    refs,
+                    commit.subject
                 )
             }
         }
+    }
+}
+
+impl CommitLine {
+    pub(crate) fn tig_graph(&self) -> String {
+        let marker = match self.parents.len() {
+            0 => 'I',
+            1 => 'o',
+            _ => 'M',
+        };
+        let mut replaced_marker = false;
+        let mut graph = self
+            .graph
+            .chars()
+            .filter_map(|character| match character {
+                '*' if !replaced_marker => {
+                    replaced_marker = true;
+                    Some(marker)
+                }
+                '|' => Some('│'),
+                '\\' => Some('┐'),
+                '/' => Some('┘'),
+                ' ' => Some(' '),
+                _ => None,
+            })
+            .collect::<String>();
+        while graph.ends_with(' ') {
+            graph.pop();
+        }
+
+        if self.parents.len() > 1 {
+            graph.push_str("─┐");
+        } else if self.parents.is_empty()
+            && self
+                .preceding_graph
+                .as_deref()
+                .is_some_and(|line| line.contains('/'))
+        {
+            graph.push_str("─┘");
+        }
+        graph.push(' ');
+        graph
     }
 }
 
@@ -73,7 +127,7 @@ fn run_git_log(revisions: &[String], sender: &Sender<HistoryEvent>) -> Result<()
             "log",
             "--graph",
             "--color=never",
-            "--date=short",
+            "--date=format-local:%Y-%m-%d %H:%M %z",
             "--decorate=short",
             &format!("--format={LOG_FORMAT}"),
         ])
@@ -132,9 +186,9 @@ pub fn parse_history_line(line: &str) -> HistoryLine {
 
     let graph = line[..marker].to_string();
     let fields: Vec<_> = line[marker + RECORD_SEPARATOR.len_utf8()..]
-        .splitn(5, FIELD_SEPARATOR)
+        .splitn(7, FIELD_SEPARATOR)
         .collect();
-    if fields.len() != 5 {
+    if fields.len() != 7 {
         return HistoryLine::Graph(line.to_string());
     }
 
@@ -142,10 +196,48 @@ pub fn parse_history_line(line: &str) -> HistoryLine {
         graph,
         oid: fields[0].to_string(),
         short_oid: fields[1].to_string(),
-        date: fields[2].to_string(),
-        refs: fields[3].to_string(),
-        subject: fields[4].to_string(),
+        parents: fields[2].split_whitespace().map(str::to_owned).collect(),
+        date: fields[3].to_string(),
+        author: fields[4].to_string(),
+        refs: fields[5].to_string(),
+        subject: fields[6].to_string(),
+        preceding_graph: None,
     })
+}
+
+pub(crate) fn fit_column(value: &str, width: usize) -> String {
+    let length = value.chars().count();
+    if length <= width {
+        return format!("{value:<width$}");
+    }
+    if width == 0 {
+        return String::new();
+    }
+
+    let mut truncated = value
+        .chars()
+        .take(width.saturating_sub(1))
+        .collect::<String>();
+    truncated.push('~');
+    truncated
+}
+
+pub(crate) fn format_refs(refs: &str) -> String {
+    refs.split(", ")
+        .filter(|name| !name.is_empty())
+        .map(|name| {
+            if let Some(branch) = name.strip_prefix("HEAD -> ") {
+                format!("[{branch}]")
+            } else if let Some(tag) = name.strip_prefix("tag: ") {
+                format!("<{tag}>")
+            } else if name.contains('/') {
+                format!("{{{name}}}")
+            } else {
+                format!("[{name}]")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -154,7 +246,7 @@ mod tests {
 
     #[test]
     fn parses_commit_record_with_graph_prefix() {
-        let line = "| * \u{1e}012345\u{1f}012345\u{1f}2026-11-01\u{1f}HEAD -> main, tag: v1\u{1f}Initial commit";
+        let line = "| * \u{1e}012345\u{1f}012345\u{1f}parent\u{1f}2026-11-01 10:30 +0900\u{1f}Alice\u{1f}HEAD -> main, tag: v1\u{1f}Initial commit";
 
         let parsed = parse_history_line(line);
 
@@ -164,9 +256,12 @@ mod tests {
                 graph: "| * ".into(),
                 oid: "012345".into(),
                 short_oid: "012345".into(),
-                date: "2026-11-01".into(),
+                parents: vec!["parent".into()],
+                date: "2026-11-01 10:30 +0900".into(),
+                author: "Alice".into(),
                 refs: "HEAD -> main, tag: v1".into(),
                 subject: "Initial commit".into(),
+                preceding_graph: None,
             })
         );
     }
@@ -180,5 +275,17 @@ mod tests {
     fn malformed_record_is_kept_as_graph_text() {
         let line = "* \u{1e}missing-fields";
         assert_eq!(parse_history_line(line), HistoryLine::Graph(line.into()));
+    }
+
+    #[test]
+    fn renders_tig_style_columns_and_refs() {
+        let line = parse_history_line(
+            "* \u{1e}012345\u{1f}012345\u{1f}\u{1f}2026-11-01 10:30 +0900\u{1f}Alice\u{1f}HEAD -> main, tag: v1, origin/main\u{1f}Initial commit",
+        );
+
+        assert_eq!(
+            line.display_text(8),
+            "2026-11-01 10:30 +0900 Alice    I [main] <v1> {origin/main} Initial commit"
+        );
     }
 }

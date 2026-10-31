@@ -9,11 +9,13 @@ use app::{App, InputMode};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
+    style::force_color_output,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 fn main() -> Result<()> {
+    force_color_output(true);
     let mut terminal = TerminalGuard::new()?;
     let result = run(terminal.terminal_mut());
     drop(terminal);
