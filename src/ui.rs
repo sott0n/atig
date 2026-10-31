@@ -506,6 +506,10 @@ fn saved_comment_box(
             format!(" · {}:{}", comment.file, comment.line),
             Style::default().fg(Color::DarkGray),
         ),
+        Span::styled(
+            "  Enter edit · S send",
+            Style::default().fg(Color::DarkGray),
+        ),
     ])];
     let content_width = width.saturating_sub(4).max(1);
     for chunk in wrap_comment_body(&comment.body, content_width) {
@@ -556,7 +560,7 @@ fn inline_comment_box(buffer: &str, editing: bool, width: usize) -> Vec<Line<'st
                 if editing {
                     "Enter update · Esc cancel"
                 } else {
-                    "Enter save · Esc cancel"
+                    "Enter save · then S send · Esc cancel"
                 },
                 Style::default().fg(Color::DarkGray),
             ),
@@ -827,7 +831,11 @@ mod tests {
         );
         assert!(rendered[0].to_string().contains("Add review comment"));
         assert!(rendered[1].to_string().contains("Please simplify this"));
-        assert!(rendered[2].to_string().contains("Enter save · Esc cancel"));
+        assert!(
+            rendered[2]
+                .to_string()
+                .contains("Enter save · then S send · Esc cancel")
+        );
     }
 
     #[test]
@@ -853,6 +861,7 @@ mod tests {
                 .to_string()
                 .contains("Review #1 · src/main.rs:12")
         );
+        assert!(rendered[0].to_string().contains("Enter edit · S send"));
     }
 
     #[test]

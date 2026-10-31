@@ -69,6 +69,8 @@ Press `?` at any time in a normal view to see the key reference.
 When adding a comment, the editor opens directly below the selected diff line.
 Press `Enter` to save it or `Esc` to cancel. Saved comments remain visible
 below their exact diff lines and long comments wrap inside the review block.
+The saved comment remains selected, so press `S` next to send that comment to
+the selected agent session.
 
 ## Key bindings
 
