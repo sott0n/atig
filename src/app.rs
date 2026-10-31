@@ -1,11 +1,17 @@
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
-use crate::git::{self, HistoryEvent, HistoryLine};
+use crate::git::{self, DiffEvent, HistoryEvent, HistoryLine};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
     Normal,
     Command,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    History,
+    Diff,
 }
 
 pub struct App {
@@ -18,7 +24,12 @@ pub struct App {
     pub should_quit: bool,
     pub pending_g: bool,
     pub revisions: Vec<String>,
+    pub view: View,
+    pub diff: Vec<String>,
+    pub diff_oid: Option<String>,
+    pub diff_loading: bool,
     history_rx: Option<Receiver<HistoryEvent>>,
+    diff_rx: Option<Receiver<DiffEvent>>,
     pending_graph: Option<String>,
 }
 
@@ -34,9 +45,70 @@ impl App {
             should_quit: false,
             pending_g: false,
             revisions: Vec::new(),
+            view: View::History,
+            diff: Vec::new(),
+            diff_oid: None,
+            diff_loading: false,
             history_rx: None,
+            diff_rx: None,
             pending_graph: None,
         }
+    }
+
+    pub fn open_selected_commit(&mut self) {
+        let Some(commit) = self
+            .selected
+            .and_then(|selected| self.history.get(selected))
+            .and_then(HistoryLine::commit)
+        else {
+            return;
+        };
+        let oid = commit.oid.clone();
+        let (tx, rx) = mpsc::channel();
+        git::stream_diff(oid.clone(), tx);
+        self.view = View::Diff;
+        self.diff.clear();
+        self.diff_oid = Some(oid);
+        self.diff_loading = true;
+        self.diff_rx = Some(rx);
+        self.message = "Loading commit diff...".into();
+    }
+
+    pub fn close_diff(&mut self) {
+        self.view = View::History;
+        self.diff_rx = None;
+        self.diff_loading = false;
+    }
+
+    pub fn drain_diff_events(&mut self) -> bool {
+        let mut changed = false;
+        loop {
+            let event = match self.diff_rx.as_ref().map(Receiver::try_recv) {
+                Some(Ok(event)) => event,
+                Some(Err(TryRecvError::Empty)) | None => break,
+                Some(Err(TryRecvError::Disconnected)) => {
+                    self.diff_loading = false;
+                    self.diff_rx = None;
+                    changed = true;
+                    break;
+                }
+            };
+            changed = true;
+            match event {
+                DiffEvent::Line(line) => self.diff.push(line),
+                DiffEvent::Done => {
+                    self.diff_loading = false;
+                    self.diff_rx = None;
+                    self.message = format!("{} lines", self.diff.len());
+                }
+                DiffEvent::Error(error) => {
+                    self.diff_loading = false;
+                    self.diff_rx = None;
+                    self.message = error;
+                }
+            }
+        }
+        changed
     }
 
     pub fn reload(&mut self) {

@@ -111,12 +111,78 @@ pub enum HistoryEvent {
     Error(String),
 }
 
+pub enum DiffEvent {
+    Line(String),
+    Done,
+    Error(String),
+}
+
 pub fn stream_history(revisions: Vec<String>, sender: Sender<HistoryEvent>) {
     thread::spawn(move || {
         if let Err(error) = run_git_log(&revisions, &sender) {
             let _ = sender.send(HistoryEvent::Error(error));
         }
     });
+}
+
+pub fn stream_diff(oid: String, sender: Sender<DiffEvent>) {
+    thread::spawn(move || {
+        if let Err(error) = run_git_show(&oid, &sender) {
+            let _ = sender.send(DiffEvent::Error(error));
+        }
+    });
+}
+
+fn run_git_show(oid: &str, sender: &Sender<DiffEvent>) -> Result<(), String> {
+    let mut child = Command::new("git")
+        .args([
+            "--no-pager",
+            "show",
+            "--no-ext-diff",
+            "--color=never",
+            "--format=fuller",
+            oid,
+        ])
+        .env("GIT_PAGER", "cat")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("Failed to start git show: {error}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Failed to capture git show output".to_string())?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Failed to capture git show error output".to_string())?;
+
+    for line in BufReader::new(stdout).lines() {
+        let line = line.map_err(|error| format!("Failed to read commit diff: {error}"))?;
+        if sender.send(DiffEvent::Line(line)).is_err() {
+            let _ = child.kill();
+            return Ok(());
+        }
+    }
+
+    let status = child
+        .wait()
+        .map_err(|error| format!("Failed to wait for git show: {error}"))?;
+    if status.success() {
+        let _ = sender.send(DiffEvent::Done);
+        return Ok(());
+    }
+
+    let mut error = String::new();
+    stderr
+        .read_to_string(&mut error)
+        .map_err(|read_error| format!("git show failed and stderr was unreadable: {read_error}"))?;
+    let error = error.trim();
+    Err(if error.is_empty() {
+        format!("git show exited with {status}")
+    } else {
+        error.to_string()
+    })
 }
 
 fn run_git_log(revisions: &[String], sender: &Sender<HistoryEvent>) -> Result<(), String> {

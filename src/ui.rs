@@ -6,7 +6,7 @@ use ratatui::{
     widgets::Paragraph,
 };
 
-use crate::app::{App, InputMode};
+use crate::app::{App, InputMode, View};
 use crate::git::{CommitLine, HistoryLine, fit_column, format_refs};
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -14,6 +14,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(frame.area());
+
+    if app.view == View::Diff {
+        draw_diff(frame, app, &areas);
+        return;
+    }
 
     let viewport_height = areas[0].height as usize;
     let start = viewport_start(app, viewport_height);
@@ -84,6 +89,31 @@ pub fn draw(frame: &mut Frame, app: &App) {
             frame.set_cursor_position((cursor_x, areas[1].y));
         }
     }
+}
+
+fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
+    let height = areas[0].height as usize;
+    let lines = app
+        .diff
+        .iter()
+        .take(height)
+        .map(|line| Line::raw(line.clone()))
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(Text::from(lines)), areas[0]);
+
+    let oid = app.diff_oid.as_deref().unwrap_or("-");
+    let left = format!("commit {oid}");
+    let right = if app.diff_loading { "loading" } else { "100%" };
+    let gap = (areas[1].width as usize).saturating_sub(left.chars().count() + right.len());
+    frame.render_widget(
+        Paragraph::new(format!("{left}{}{right}", " ".repeat(gap))).style(
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        ),
+        areas[1],
+    );
 }
 
 fn history_line(

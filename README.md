@@ -10,6 +10,7 @@ The first development slice provides a streaming Git history view:
 - j/k, arrow keys, gg, G, Ctrl-d, and Ctrl-u navigate commits.
 - :log <revision...> reloads the view with a Git revision specification.
 - :reload, :help, and :q provide the initial command interface.
+- Enter opens the selected commit; Esc or q returns to history.
 
 ## Development
 
@@ -17,4 +18,3 @@ The first development slice provides a streaming Git history view:
     cargo test
 
 Run atig from inside a Git repository.
-

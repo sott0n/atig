@@ -5,7 +5,7 @@ mod ui;
 use std::{io, time::Duration};
 
 use anyhow::Result;
-use app::{App, InputMode};
+use app::{App, InputMode, View};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
@@ -29,6 +29,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
 
     while !app.should_quit {
         needs_draw |= app.drain_history_events();
+        needs_draw |= app.drain_diff_events();
         if needs_draw {
             terminal.draw(|frame| ui::draw(frame, &app))?;
             needs_draw = false;
@@ -46,6 +47,15 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
         }
         needs_draw = true;
 
+        if app.view == View::Diff {
+            if let (KeyCode::Esc | KeyCode::Char('q'), KeyModifiers::NONE) =
+                (key.code, key.modifiers)
+            {
+                app.close_diff();
+            }
+            continue;
+        }
+
         match app.input_mode {
             InputMode::Normal => match (key.code, key.modifiers) {
                 (KeyCode::Char('q'), KeyModifiers::NONE) => app.should_quit = true,
@@ -56,6 +66,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 (KeyCode::Char('G'), KeyModifiers::SHIFT) => app.select_last(),
                 (KeyCode::Char('g'), KeyModifiers::NONE) => app.handle_g(),
                 (KeyCode::Char(':'), KeyModifiers::NONE) => app.start_command(),
+                (KeyCode::Enter, KeyModifiers::NONE) => app.open_selected_commit(),
                 _ => app.pending_g = false,
             },
             InputMode::Command => match key.code {
