@@ -1,0 +1,96 @@
+mod app;
+mod git;
+mod ui;
+
+use std::{io, time::Duration};
+
+use anyhow::Result;
+use app::{App, InputMode};
+use crossterm::{
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    execute,
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+};
+use ratatui::{Terminal, backend::CrosstermBackend};
+
+fn main() -> Result<()> {
+    let mut terminal = TerminalGuard::new()?;
+    let result = run(terminal.terminal_mut());
+    drop(terminal);
+    result
+}
+
+fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+    let mut app = App::new();
+    app.reload();
+    let mut needs_draw = true;
+
+    while !app.should_quit {
+        needs_draw |= app.drain_history_events();
+        if needs_draw {
+            terminal.draw(|frame| ui::draw(frame, &app))?;
+            needs_draw = false;
+        }
+
+        if !event::poll(Duration::from_millis(50))? {
+            continue;
+        }
+
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+        needs_draw = true;
+
+        match app.input_mode {
+            InputMode::Normal => match (key.code, key.modifiers) {
+                (KeyCode::Char('q'), KeyModifiers::NONE) => app.should_quit = true,
+                (KeyCode::Char('j') | KeyCode::Down, KeyModifiers::NONE) => app.move_selection(1),
+                (KeyCode::Char('k') | KeyCode::Up, KeyModifiers::NONE) => app.move_selection(-1),
+                (KeyCode::Char('d'), KeyModifiers::CONTROL) => app.move_selection(10),
+                (KeyCode::Char('u'), KeyModifiers::CONTROL) => app.move_selection(-10),
+                (KeyCode::Char('G'), KeyModifiers::SHIFT) => app.select_last(),
+                (KeyCode::Char('g'), KeyModifiers::NONE) => app.handle_g(),
+                (KeyCode::Char(':'), KeyModifiers::NONE) => app.start_command(),
+                _ => app.pending_g = false,
+            },
+            InputMode::Command => match key.code {
+                KeyCode::Esc => app.cancel_command(),
+                KeyCode::Enter => app.submit_command(),
+                KeyCode::Backspace => app.command_backspace(),
+                KeyCode::Char(character) => app.command_push(character),
+                _ => {}
+            },
+        }
+    }
+
+    Ok(())
+}
+
+struct TerminalGuard {
+    terminal: Terminal<CrosstermBackend<io::Stdout>>,
+}
+
+impl TerminalGuard {
+    fn new() -> Result<Self> {
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        execute!(stdout, EnterAlternateScreen)?;
+        let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
+        Ok(Self { terminal })
+    }
+
+    fn terminal_mut(&mut self) -> &mut Terminal<CrosstermBackend<io::Stdout>> {
+        &mut self.terminal
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+        let _ = self.terminal.show_cursor();
+    }
+}
