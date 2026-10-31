@@ -60,6 +60,9 @@ atig
 5. Press `s`, select a repository session with `j`/`k`, and press `Enter`.
 6. Press `S`, verify the destination, and press `y` to deliver the review.
 
+The selected destination remains visible as `target <provider>:<session>` in
+the status bar. The active session is also marked with `*` in the picker.
+
 Press `?` at any time in a normal view to see the key reference.
 
 ## Key bindings

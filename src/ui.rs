@@ -72,8 +72,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
                 app.message.clone()
             } else {
                 format!(
-                    "[{}] {oid} - commit {position} of {total}",
-                    app.current_branch()
+                    "[{}] {oid} - commit {position} of {total}{}",
+                    app.current_branch(),
+                    agent_target_suffix(app)
                 )
             };
             let right = if app.loading { "loading" } else { "100%" };
@@ -158,8 +159,10 @@ fn draw_sessions(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) 
         .skip(start)
         .take(height)
         .map(|(index, session)| {
+            let active = app.agent_target.as_ref() == Some(&session.target);
             let text = format!(
-                "{} [{}] {}",
+                "{} {} [{}] {}",
+                if active { "*" } else { " " },
                 session.target.label(),
                 session.status,
                 session.title
@@ -250,8 +253,9 @@ fn draw_comments(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) 
         return;
     }
     let status = format!(
-        "Review comments - {} total - j/k move  e edit  d delete  q back",
-        app.comments.len()
+        "Review comments - {} total{} - j/k move  e edit  d delete  q back",
+        app.comments.len(),
+        agent_target_suffix(app)
     );
     frame.render_widget(
         Paragraph::new(status).style(
@@ -352,10 +356,11 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
         app.diff_scroll + 1
     };
     let left = format!(
-        "commit {oid} - line {position} of {} - {} comments{}",
+        "commit {oid} - line {position} of {} - {} comments{}{}",
         app.diff.len(),
         app.comments.len(),
-        if app.dispatching { " - sending" } else { "" }
+        if app.dispatching { " - sending" } else { "" },
+        agent_target_suffix(app)
     );
     let right = if app.diff_loading {
         "loading".to_string()
@@ -374,6 +379,13 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
         ),
         areas[1],
     );
+}
+
+fn agent_target_suffix(app: &App) -> String {
+    app.agent_target
+        .as_ref()
+        .map(|target| format!(" - target {}", target.short_label()))
+        .unwrap_or_default()
 }
 
 fn diff_viewport_start(app: &App, height: usize) -> usize {

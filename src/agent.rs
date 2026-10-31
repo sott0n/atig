@@ -378,12 +378,23 @@ impl AgentTarget {
     }
 
     pub fn label(&self) -> String {
-        let provider = match &self.provider {
+        format!("{}:{}", self.provider_name(), self.session_id)
+    }
+
+    pub fn short_label(&self) -> String {
+        const VISIBLE_ID_CHARS: usize = 12;
+        let mut id = self.session_id.chars();
+        let visible = id.by_ref().take(VISIBLE_ID_CHARS).collect::<String>();
+        let suffix = if id.next().is_some() { "…" } else { "" };
+        format!("{}:{visible}{suffix}", self.provider_name())
+    }
+
+    fn provider_name(&self) -> &str {
+        match &self.provider {
             AgentProvider::Codex => "codex",
             AgentProvider::Claude => "claude",
             AgentProvider::Other(name) => name,
-        };
-        format!("{provider}:{}", self.session_id)
+        }
     }
 }
 
@@ -397,6 +408,7 @@ mod tests {
 
         assert_eq!(target.provider, AgentProvider::Codex);
         assert_eq!(target.label(), "codex:019a-test.session");
+        assert_eq!(target.short_label(), "codex:019a-test.se…");
     }
 
     #[test]
