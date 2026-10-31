@@ -66,6 +66,9 @@ also marked with `*` in the picker.
 
 Press `?` at any time in a normal view to see the key reference.
 
+When adding a comment, the editor opens directly below the selected diff line.
+Press `Enter` to save it or `Esc` to cancel.
+
 ## Key bindings
 
 ### History

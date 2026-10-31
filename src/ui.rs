@@ -321,15 +321,28 @@ fn draw_send_confirmation(frame: &mut Frame, app: &App, area: ratatui::layout::R
 
 fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
     let height = areas[0].height as usize;
-    let start = diff_viewport_start(app, height);
-    let lines = app
-        .diff
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(height)
-        .map(|(index, line)| diff_line(line, app.diff_scroll == index, areas[0].width as usize))
-        .collect::<Vec<_>>();
+    let commenting = app.input_mode == InputMode::Comment;
+    let diff_height = if commenting {
+        height.saturating_sub(3).max(1)
+    } else {
+        height
+    };
+    let start = diff_viewport_start(app, diff_height);
+    let mut lines = Vec::with_capacity(height);
+    for (index, line) in app.diff.iter().enumerate().skip(start).take(diff_height) {
+        lines.push(diff_line(
+            line,
+            app.diff_scroll == index,
+            areas[0].width as usize,
+        ));
+        if commenting && app.diff_scroll == index {
+            lines.extend(inline_comment_box(
+                &app.comment_buffer,
+                areas[0].width as usize,
+            ));
+        }
+    }
+    lines.truncate(height);
     frame.render_widget(Paragraph::new(Text::from(lines)), areas[0]);
 
     if app.input_mode == InputMode::ConfirmSend {
@@ -345,7 +358,30 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
         return;
     }
     if app.input_mode == InputMode::Comment {
-        draw_comment_prompt(frame, app, areas[1]);
+        let status = format!(
+            "Add review comment - Enter save  Esc cancel{}",
+            agent_target_suffix(app)
+        );
+        frame.render_widget(
+            Paragraph::new(status).style(
+                Style::default()
+                    .fg(Color::White)
+                    .bg(Color::Blue)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            areas[1],
+        );
+        let input_y = areas[0]
+            .y
+            .saturating_add(app.diff_scroll.saturating_sub(start) as u16)
+            .saturating_add(2)
+            .min(areas[0].bottom().saturating_sub(1));
+        let cursor_x = areas[0]
+            .x
+            .saturating_add(2)
+            .saturating_add(app.comment_buffer.chars().count() as u16)
+            .min(areas[0].right().saturating_sub(2));
+        frame.set_cursor_position((cursor_x, input_y));
         return;
     }
 
@@ -379,6 +415,36 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
         ),
         areas[1],
     );
+}
+
+fn inline_comment_box(buffer: &str, width: usize) -> Vec<Line<'static>> {
+    let border = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let input = Style::default().fg(Color::White).bg(Color::DarkGray);
+    let header = boxed_label("╭─ ", "Add review comment ", "╮", width);
+    let footer = boxed_label("╰─ ", "Enter save · Esc cancel ", "╯", width);
+
+    let mut input_line = Line::styled(format!("│ {buffer}"), input);
+    input_line.push_span(Span::styled(
+        " ".repeat(width.saturating_sub(input_line.width() + 1)),
+        input,
+    ));
+    input_line.push_span(Span::styled("│", input.fg(Color::Cyan)));
+
+    vec![
+        Line::styled(header, border),
+        input_line,
+        Line::styled(footer, border),
+    ]
+}
+
+fn boxed_label(prefix: &str, label: &str, end: &str, width: usize) -> String {
+    let used = prefix.chars().count() + label.chars().count() + end.chars().count();
+    format!(
+        "{prefix}{label}{}{end}",
+        "─".repeat(width.saturating_sub(used))
+    )
 }
 
 fn agent_target_suffix(app: &App) -> String {
@@ -623,5 +689,16 @@ mod tests {
 
         assert_eq!(rendered.style.bg, Some(Color::Green));
         assert_eq!(rendered.width(), 80);
+    }
+
+    #[test]
+    fn inline_comment_box_uses_three_full_width_lines() {
+        let rendered = inline_comment_box("Please simplify this", 60);
+
+        assert_eq!(rendered.len(), 3);
+        assert!(rendered.iter().all(|line| line.width() == 60));
+        assert!(rendered[0].to_string().contains("Add review comment"));
+        assert!(rendered[1].to_string().contains("Please simplify this"));
+        assert!(rendered[2].to_string().contains("Enter save · Esc cancel"));
     }
 }
