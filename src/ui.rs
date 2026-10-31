@@ -15,6 +15,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(frame.area());
 
+    if app.view == View::Help {
+        draw_help(frame, &areas);
+        return;
+    }
     if app.view == View::Diff {
         draw_diff(frame, app, &areas);
         return;
@@ -94,7 +98,42 @@ pub fn draw(frame: &mut Frame, app: &App) {
         }
         InputMode::Comment => unreachable!("comments are drawn in the diff view"),
         InputMode::ConfirmSend => unreachable!("send confirmation is drawn in the review view"),
+        InputMode::Search => draw_search_prompt(frame, app, areas[1]),
     }
+}
+
+fn draw_help(frame: &mut Frame, areas: &[ratatui::layout::Rect]) {
+    let lines = [
+        "atig keys",
+        "",
+        "j/k, arrows       move",
+        "gg / G            first / last",
+        "Ctrl-d / Ctrl-u   page down / up",
+        "Enter             open selected commit",
+        "Esc, q            back",
+        "[f / ]f           previous / next file",
+        "[c / ]c           previous / next change",
+        "/, n, N           search / next / previous",
+        "r                 reload",
+        "a                 add review comment",
+        "v                 view review comments",
+        "S                 send review comments",
+        ":                 command",
+        "?                 toggle this help",
+    ]
+    .into_iter()
+    .map(Line::raw)
+    .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(Text::from(lines)), areas[0]);
+    frame.render_widget(
+        Paragraph::new("Help - q, Esc, or ? to return").style(
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        ),
+        areas[1],
+    );
 }
 
 fn draw_comments(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
@@ -178,6 +217,17 @@ fn draw_command_prompt(frame: &mut Frame, app: &App, area: ratatui::layout::Rect
     frame.set_cursor_position((cursor_x, area.y));
 }
 
+fn draw_search_prompt(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let prompt = format!("/{}", app.search_input);
+    frame.render_widget(Paragraph::new(prompt), area);
+    let cursor_x = area
+        .x
+        .saturating_add(1)
+        .saturating_add(app.search_input.chars().count() as u16)
+        .min(area.right().saturating_sub(1));
+    frame.set_cursor_position((cursor_x, area.y));
+}
+
 fn draw_send_confirmation(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let target = app
         .agent_target
@@ -211,6 +261,10 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
 
     if app.input_mode == InputMode::ConfirmSend {
         draw_send_confirmation(frame, app, areas[1]);
+        return;
+    }
+    if app.input_mode == InputMode::Search {
+        draw_search_prompt(frame, app, areas[1]);
         return;
     }
     if app.input_mode == InputMode::Command {

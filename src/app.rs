@@ -11,6 +11,7 @@ pub enum InputMode {
     Command,
     Comment,
     ConfirmSend,
+    Search,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,6 +19,7 @@ pub enum View {
     History,
     Diff,
     Comments,
+    Help,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,9 +64,12 @@ pub struct App {
     pub comment_selected: usize,
     pub agent_target: Option<AgentTarget>,
     pub dispatching: bool,
+    pub search_input: String,
+    pub search_query: String,
     comment_anchor: Option<CommentAnchor>,
     comment_edit_index: Option<usize>,
     dispatch_rx: Option<Receiver<DispatchEvent>>,
+    help_return: View,
     history_rx: Option<Receiver<HistoryEvent>>,
     history_cancel: Option<git::Cancellation>,
     diff_rx: Option<Receiver<DiffEvent>>,
@@ -95,9 +100,12 @@ impl App {
             comment_selected: 0,
             agent_target: None,
             dispatching: false,
+            search_input: String::new(),
+            search_query: String::new(),
             comment_anchor: None,
             comment_edit_index: None,
             dispatch_rx: None,
+            help_return: View::History,
             history_rx: None,
             history_cancel: None,
             diff_rx: None,
@@ -139,6 +147,98 @@ impl App {
             cancellation.cancel();
         }
         self.diff_loading = false;
+    }
+
+    pub fn reload_diff(&mut self) {
+        let Some(oid) = self.diff_oid.clone() else {
+            return;
+        };
+        let (tx, rx) = mpsc::channel();
+        if let Some(cancellation) = self.diff_cancel.take() {
+            cancellation.cancel();
+        }
+        self.diff_cancel = Some(git::stream_diff(oid, tx));
+        self.diff.clear();
+        self.diff_scroll = 0;
+        self.diff_loading = true;
+        self.diff_rx = Some(rx);
+        self.message = "Reloading commit diff...".into();
+    }
+
+    pub fn open_help(&mut self) {
+        self.help_return = self.view;
+        self.view = View::Help;
+        self.input_mode = InputMode::Normal;
+    }
+
+    pub fn close_help(&mut self) {
+        self.view = self.help_return;
+    }
+
+    pub fn start_search(&mut self) {
+        self.search_input.clear();
+        self.input_mode = InputMode::Search;
+    }
+
+    pub fn search_push(&mut self, character: char) {
+        self.search_input.push(character);
+    }
+
+    pub fn search_backspace(&mut self) {
+        if self.search_input.pop().is_none() {
+            self.cancel_search();
+        }
+    }
+
+    pub fn cancel_search(&mut self) {
+        self.search_input.clear();
+        self.input_mode = InputMode::Normal;
+    }
+
+    pub fn submit_search(&mut self) {
+        let query = self.search_input.trim().to_string();
+        self.search_input.clear();
+        self.input_mode = InputMode::Normal;
+        if query.is_empty() {
+            return;
+        }
+        self.search_query = query;
+        self.repeat_search(1);
+    }
+
+    pub fn repeat_search(&mut self, direction: isize) {
+        if self.search_query.is_empty() {
+            self.message = "No previous search".into();
+            return;
+        }
+        let query = self.search_query.to_lowercase();
+        let destination = match self.view {
+            View::History => find_wrapped(
+                self.history.len(),
+                self.selected.unwrap_or(0),
+                direction,
+                |index| {
+                    self.history[index].commit().is_some_and(|commit| {
+                        format!(
+                            "{} {} {} {} {}",
+                            commit.oid, commit.date, commit.author, commit.refs, commit.subject
+                        )
+                        .to_lowercase()
+                        .contains(&query)
+                    })
+                },
+            ),
+            View::Diff => find_wrapped(self.diff.len(), self.diff_scroll, direction, |index| {
+                self.diff[index].to_lowercase().contains(&query)
+            }),
+            View::Comments | View::Help => None,
+        };
+        match (self.view, destination) {
+            (View::History, Some(index)) => self.selected = Some(index),
+            (View::Diff, Some(index)) => self.diff_scroll = index,
+            (_, Some(_)) => {}
+            (_, None) => self.message = format!("Pattern not found: {}", self.search_query),
+        }
     }
 
     pub fn move_diff(&mut self, amount: isize) {
@@ -562,8 +662,7 @@ impl App {
                 _ => self.message = "Usage: :session <codex|claude|other> <id>".into(),
             },
             Some("help") => {
-                self.message =
-                    "j/k move  gg/G ends  Enter diff  :session <provider> <id>  :q quit".into();
+                self.open_help();
             }
             Some(other) => self.message = format!("Unknown command: {other}"),
             None => {}
@@ -662,6 +761,28 @@ fn diff_location(diff: &[String], cursor: usize) -> Option<(String, usize)> {
         }
     }
     None
+}
+
+fn find_wrapped(
+    length: usize,
+    current: usize,
+    direction: isize,
+    matches: impl Fn(usize) -> bool,
+) -> Option<usize> {
+    if length == 0 {
+        return None;
+    }
+    let current = current.min(length - 1);
+    if direction >= 0 {
+        ((current + 1)..length)
+            .chain(0..=current)
+            .find(|&index| matches(index))
+    } else {
+        (0..current)
+            .rev()
+            .chain((current..length).rev())
+            .find(|&index| matches(index))
+    }
 }
 
 fn parse_hunk_start(line: &str) -> Option<(usize, usize)> {
@@ -881,5 +1002,23 @@ mod tests {
         app.drain_history_events();
         assert_eq!(app.history.len(), 300);
         assert!(!app.loading);
+    }
+
+    #[test]
+    fn search_wraps_in_history_and_diff() {
+        let mut app = app_with_history();
+        app.search_query = "two".into();
+        app.repeat_search(1);
+        assert_eq!(app.selected, Some(2));
+
+        app.view = View::Diff;
+        app.diff = vec!["first".into(), "needle".into(), "last".into()];
+        app.diff_scroll = 2;
+        app.search_query = "needle".into();
+        app.repeat_search(1);
+        assert_eq!(app.diff_scroll, 1);
+
+        app.repeat_search(-1);
+        assert_eq!(app.diff_scroll, 1);
     }
 }

@@ -58,6 +58,27 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
             continue;
         }
 
+        if app.input_mode == InputMode::Search {
+            match key.code {
+                KeyCode::Esc => app.cancel_search(),
+                KeyCode::Enter => app.submit_search(),
+                KeyCode::Backspace => app.search_backspace(),
+                KeyCode::Char(character) => app.search_push(character),
+                _ => {}
+            }
+            continue;
+        }
+
+        if app.view == View::Help {
+            if matches!(
+                key.code,
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?')
+            ) {
+                app.close_help();
+            }
+            continue;
+        }
+
         if app.view == View::Comments {
             if app.input_mode == InputMode::Comment {
                 match key.code {
@@ -79,6 +100,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                     (KeyCode::Char('e'), KeyModifiers::NONE) => app.edit_selected_comment(),
                     (KeyCode::Char('d'), KeyModifiers::NONE) => app.delete_selected_comment(),
                     (KeyCode::Char('S'), KeyModifiers::SHIFT) => app.request_send_review(),
+                    (KeyCode::Char('?'), _) => app.open_help(),
                     _ => {}
                 }
             }
@@ -126,6 +148,11 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 (KeyCode::Char('v'), KeyModifiers::NONE) => app.open_comments(),
                 (KeyCode::Char(':'), KeyModifiers::NONE) => app.start_command(),
                 (KeyCode::Char('S'), KeyModifiers::SHIFT) => app.request_send_review(),
+                (KeyCode::Char('/'), KeyModifiers::NONE) => app.start_search(),
+                (KeyCode::Char('n'), KeyModifiers::NONE) => app.repeat_search(1),
+                (KeyCode::Char('N'), KeyModifiers::SHIFT) => app.repeat_search(-1),
+                (KeyCode::Char('r'), KeyModifiers::NONE) => app.reload_diff(),
+                (KeyCode::Char('?'), _) => app.open_help(),
                 _ => {
                     app.pending_g = false;
                     app.diff_jump_direction = None;
@@ -145,6 +172,11 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 (KeyCode::Char('g'), KeyModifiers::NONE) => app.handle_g(),
                 (KeyCode::Char(':'), KeyModifiers::NONE) => app.start_command(),
                 (KeyCode::Enter, KeyModifiers::NONE) => app.open_selected_commit(),
+                (KeyCode::Char('/'), KeyModifiers::NONE) => app.start_search(),
+                (KeyCode::Char('n'), KeyModifiers::NONE) => app.repeat_search(1),
+                (KeyCode::Char('N'), KeyModifiers::SHIFT) => app.repeat_search(-1),
+                (KeyCode::Char('r'), KeyModifiers::NONE) => app.reload(),
+                (KeyCode::Char('?'), _) => app.open_help(),
                 _ => app.pending_g = false,
             },
             InputMode::Command => match key.code {
@@ -156,6 +188,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
             },
             InputMode::Comment => unreachable!("comments are only entered in the diff view"),
             InputMode::ConfirmSend => unreachable!("send confirmation is handled first"),
+            InputMode::Search => unreachable!("search input is handled first"),
         }
     }
 
