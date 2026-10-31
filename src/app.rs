@@ -61,6 +61,7 @@ pub struct App {
     pub diff_oid: Option<String>,
     pub diff_loading: bool,
     pub diff_scroll: usize,
+    pub diff_comment_selected: Option<usize>,
     pub diff_jump_direction: Option<isize>,
     pub comments: Vec<ReviewComment>,
     pub comment_buffer: String,
@@ -102,6 +103,7 @@ impl App {
             diff_oid: None,
             diff_loading: false,
             diff_scroll: 0,
+            diff_comment_selected: None,
             diff_jump_direction: None,
             comments: Vec::new(),
             comment_buffer: String::new(),
@@ -146,6 +148,7 @@ impl App {
         self.diff_oid = Some(oid);
         self.diff_loading = true;
         self.diff_scroll = 0;
+        self.diff_comment_selected = None;
         self.diff_jump_direction = None;
         self.diff_rx = Some(rx);
         self.message = "Loading commit diff...".into();
@@ -153,6 +156,7 @@ impl App {
 
     pub fn close_diff(&mut self) {
         self.view = View::History;
+        self.diff_comment_selected = None;
         self.pending_g = false;
         self.diff_jump_direction = None;
         self.diff_rx = None;
@@ -173,6 +177,7 @@ impl App {
         self.diff_cancel = Some(git::stream_diff(oid, tx));
         self.diff.clear();
         self.diff_scroll = 0;
+        self.diff_comment_selected = None;
         self.diff_loading = true;
         self.diff_rx = Some(rx);
         self.message = "Reloading commit diff...".into();
@@ -309,7 +314,10 @@ impl App {
         };
         match (self.view, destination) {
             (View::History, Some(index)) => self.selected = Some(index),
-            (View::Diff, Some(index)) => self.diff_scroll = index,
+            (View::Diff, Some(index)) => {
+                self.diff_scroll = index;
+                self.diff_comment_selected = None;
+            }
             (_, Some(_)) => {}
             (_, None) => self.message = format!("Pattern not found: {}", self.search_query),
         }
@@ -317,6 +325,7 @@ impl App {
 
     pub fn move_diff(&mut self, amount: isize) {
         self.pending_g = false;
+        self.diff_comment_selected = None;
         if amount < 0 {
             self.diff_scroll = self.diff_scroll.saturating_sub(amount.unsigned_abs());
         } else {
@@ -327,9 +336,66 @@ impl App {
         }
     }
 
+    pub fn move_diff_cursor(&mut self, direction: isize) {
+        self.pending_g = false;
+        if direction > 0 {
+            if let Some(selected) = self.diff_comment_selected {
+                if let Some(next) = self
+                    .comment_indices_at_diff_line(self.diff_scroll)
+                    .into_iter()
+                    .find(|&index| index > selected)
+                {
+                    self.diff_comment_selected = Some(next);
+                } else {
+                    self.diff_comment_selected = None;
+                    self.diff_scroll = self
+                        .diff_scroll
+                        .saturating_add(1)
+                        .min(self.diff.len().saturating_sub(1));
+                }
+            } else if let Some(first) = self
+                .comment_indices_at_diff_line(self.diff_scroll)
+                .into_iter()
+                .next()
+            {
+                self.diff_comment_selected = Some(first);
+            } else {
+                self.diff_scroll = self
+                    .diff_scroll
+                    .saturating_add(1)
+                    .min(self.diff.len().saturating_sub(1));
+            }
+        } else if let Some(selected) = self.diff_comment_selected {
+            self.diff_comment_selected = self
+                .comment_indices_at_diff_line(self.diff_scroll)
+                .into_iter()
+                .rev()
+                .find(|&index| index < selected);
+        } else if self.diff_scroll > 0 {
+            self.diff_scroll -= 1;
+            self.diff_comment_selected = self
+                .comment_indices_at_diff_line(self.diff_scroll)
+                .into_iter()
+                .next_back();
+        }
+    }
+
+    fn comment_indices_at_diff_line(&self, diff_index: usize) -> Vec<usize> {
+        self.comments
+            .iter()
+            .enumerate()
+            .filter(|(_, comment)| {
+                comment.diff_index == diff_index
+                    && self.diff_oid.as_deref() == Some(comment.commit.as_str())
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
     pub fn handle_diff_g(&mut self) {
         if self.pending_g {
             self.diff_scroll = 0;
+            self.diff_comment_selected = None;
             self.pending_g = false;
         } else {
             self.pending_g = true;
@@ -339,10 +405,12 @@ impl App {
     pub fn select_diff_end(&mut self) {
         self.pending_g = false;
         self.diff_scroll = self.diff.len().saturating_sub(1);
+        self.diff_comment_selected = None;
     }
 
     pub fn begin_diff_jump(&mut self, direction: isize) {
         self.pending_g = false;
+        self.diff_comment_selected = None;
         self.diff_jump_direction = Some(direction.signum());
     }
 
@@ -393,6 +461,7 @@ impl App {
             return;
         }
         self.diff_scroll = line.saturating_sub(1).min(self.diff.len() - 1);
+        self.diff_comment_selected = None;
         self.message = format!("Line {}", self.diff_scroll + 1);
     }
 
@@ -449,6 +518,7 @@ impl App {
             self.cancel_comment();
             return;
         };
+        let comment_index = self.comments.len();
         self.comments.push(ReviewComment {
             commit: anchor.commit,
             file: anchor.file,
@@ -456,6 +526,7 @@ impl App {
             diff_index: anchor.diff_index,
             body,
         });
+        self.diff_comment_selected = Some(comment_index);
         self.comment_buffer.clear();
         self.input_mode = InputMode::Normal;
         self.message = format!("{} review comments", self.comments.len());
@@ -496,12 +567,30 @@ impl App {
         self.input_mode = InputMode::Comment;
     }
 
+    pub fn edit_inline_comment(&mut self) {
+        let Some(index) = self.diff_comment_selected else {
+            return;
+        };
+        self.comment_selected = index;
+        self.edit_selected_comment();
+    }
+
+    pub fn editing_comment_index(&self) -> Option<usize> {
+        self.comment_edit_index
+    }
+
     pub fn delete_selected_comment(&mut self) {
         if self.comment_selected >= self.comments.len() {
             self.message = "No comments".into();
             return;
         }
-        self.comments.remove(self.comment_selected);
+        let removed = self.comment_selected;
+        self.comments.remove(removed);
+        self.diff_comment_selected = match self.diff_comment_selected {
+            Some(selected) if selected == removed => None,
+            Some(selected) if selected > removed => Some(selected - 1),
+            selected => selected,
+        };
         self.comment_selected = self
             .comment_selected
             .min(self.comments.len().saturating_sub(1));
@@ -553,6 +642,7 @@ impl App {
             DispatchEvent::Done => {
                 self.comments.clear();
                 self.comment_selected = 0;
+                self.diff_comment_selected = None;
                 self.message = "Review delivered".into();
             }
             DispatchEvent::Error(error) => self.message = error,
@@ -1013,6 +1103,38 @@ mod tests {
 
         app.move_diff(-1);
         assert_eq!(app.diff_scroll, 0);
+    }
+
+    #[test]
+    fn diff_cursor_moves_through_comments_and_enter_edits_them() {
+        let mut app = App::new();
+        app.diff_oid = Some("abc123".into());
+        app.diff = vec!["line one".into(), "line two".into()];
+        app.comments = vec![ReviewComment {
+            commit: "abc123".into(),
+            file: "src/main.rs".into(),
+            line: 1,
+            diff_index: 0,
+            body: "Please simplify".into(),
+        }];
+
+        app.move_diff_cursor(1);
+        assert_eq!(app.diff_scroll, 0);
+        assert_eq!(app.diff_comment_selected, Some(0));
+
+        app.edit_inline_comment();
+        assert_eq!(app.input_mode, InputMode::Comment);
+        assert_eq!(app.comment_buffer, "Please simplify");
+        assert_eq!(app.editing_comment_index(), Some(0));
+
+        app.cancel_comment();
+        app.move_diff_cursor(1);
+        assert_eq!(app.diff_scroll, 1);
+        assert_eq!(app.diff_comment_selected, None);
+
+        app.move_diff_cursor(-1);
+        assert_eq!(app.diff_scroll, 0);
+        assert_eq!(app.diff_comment_selected, Some(0));
     }
 
     #[test]

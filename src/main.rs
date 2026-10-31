@@ -152,8 +152,8 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
             let half_page = (page / 2).max(1);
             match (key.code, key.modifiers) {
                 (KeyCode::Esc | KeyCode::Char('q'), KeyModifiers::NONE) => app.close_diff(),
-                (KeyCode::Char('j') | KeyCode::Down, KeyModifiers::NONE) => app.move_diff(1),
-                (KeyCode::Char('k') | KeyCode::Up, KeyModifiers::NONE) => app.move_diff(-1),
+                (KeyCode::Char('j') | KeyCode::Down, KeyModifiers::NONE) => app.move_diff_cursor(1),
+                (KeyCode::Char('k') | KeyCode::Up, KeyModifiers::NONE) => app.move_diff_cursor(-1),
                 (KeyCode::Char('J'), KeyModifiers::SHIFT) => app.move_diff(10),
                 (KeyCode::Char('K'), KeyModifiers::SHIFT) => app.move_diff(-10),
                 (KeyCode::Char('d'), KeyModifiers::CONTROL) => app.move_diff(half_page),
@@ -168,6 +168,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 (KeyCode::Char('g'), KeyModifiers::NONE) => app.handle_diff_g(),
                 (KeyCode::Home, _) => {
                     app.diff_scroll = 0;
+                    app.diff_comment_selected = None;
                     app.pending_g = false;
                 }
                 (KeyCode::End, _) => app.select_diff_end(),
@@ -184,6 +185,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 (KeyCode::Tab, _) => app.jump_diff(DiffTarget::File, 1),
                 (KeyCode::BackTab, _) => app.jump_diff(DiffTarget::File, -1),
                 (KeyCode::Char('a'), KeyModifiers::NONE) => app.start_comment(),
+                (KeyCode::Enter, KeyModifiers::NONE) => app.edit_inline_comment(),
                 (KeyCode::Char('v'), KeyModifiers::NONE) => app.open_comments(),
                 (KeyCode::Char(':'), KeyModifiers::NONE) => app.start_command(),
                 (KeyCode::Char('S'), KeyModifiers::SHIFT) => app.request_send_review(),

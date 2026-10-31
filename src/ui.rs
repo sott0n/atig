@@ -117,7 +117,7 @@ fn draw_help(frame: &mut Frame, areas: &[ratatui::layout::Rect]) {
         "Ctrl-f / Ctrl-b   full page down / up",
         "PgDn / PgUp       full page down / up",
         "J / K             move 10 lines",
-        "Enter             open selected commit",
+        "Enter             open commit / edit inline comment",
         "Esc, q            back",
         "[f / ]f, Tab       previous / next file",
         "[c / ]c, { / }     previous / next change",
@@ -339,13 +339,14 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
         }
         lines.push(diff_line(
             line,
-            app.diff_scroll == index,
+            app.diff_scroll == index && app.diff_comment_selected.is_none(),
             areas[0].width as usize,
         ));
         if commenting && app.diff_scroll == index {
             comment_input_row = Some(lines.len() + 1);
             lines.extend(inline_comment_box(
                 &app.comment_buffer,
+                app.editing_comment_index().is_some(),
                 areas[0].width as usize,
             ));
         }
@@ -353,6 +354,7 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
             lines.extend(saved_comment_box(
                 comment,
                 comment_index + 1,
+                app.diff_comment_selected == Some(comment_index),
                 areas[0].width as usize,
             ));
         }
@@ -411,13 +413,22 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
     } else {
         app.diff_scroll + 1
     };
-    let left = format!(
-        "commit {oid} - line {position} of {} - {} comments{}{}",
-        app.diff.len(),
-        app.comments.len(),
-        if app.dispatching { " - sending" } else { "" },
-        agent_target_suffix(app)
-    );
+    let left = if let Some(comment_index) = app.diff_comment_selected {
+        format!(
+            "Review #{} - Enter edit - {} comments{}",
+            comment_index + 1,
+            app.comments.len(),
+            agent_target_suffix(app)
+        )
+    } else {
+        format!(
+            "commit {oid} - line {position} of {} - {} comments{}{}",
+            app.diff.len(),
+            app.comments.len(),
+            if app.dispatching { " - sending" } else { "" },
+            agent_target_suffix(app)
+        )
+    };
     let right = if app.diff_loading {
         "loading".to_string()
     } else if app.diff.is_empty() {
@@ -441,26 +452,47 @@ fn comments_for_diff_line(
     app: &App,
     diff_index: usize,
 ) -> impl Iterator<Item = (usize, &ReviewComment)> {
-    app.comments.iter().enumerate().filter(move |(_, comment)| {
-        comment.diff_index == diff_index && app.diff_oid.as_deref() == Some(comment.commit.as_str())
-    })
+    app.comments
+        .iter()
+        .enumerate()
+        .filter(move |(index, comment)| {
+            comment.diff_index == diff_index
+                && app.diff_oid.as_deref() == Some(comment.commit.as_str())
+                && app.editing_comment_index() != Some(*index)
+        })
 }
 
 fn rendered_diff_row_height(app: &App, diff_index: usize, width: usize) -> usize {
     1 + comments_for_diff_line(app, diff_index)
-        .map(|(comment_index, comment)| saved_comment_box(comment, comment_index + 1, width).len())
+        .map(|(comment_index, comment)| {
+            saved_comment_box(
+                comment,
+                comment_index + 1,
+                app.diff_comment_selected == Some(comment_index),
+                width,
+            )
+            .len()
+        })
         .sum::<usize>()
 }
 
-fn saved_comment_box(comment: &ReviewComment, number: usize, width: usize) -> Vec<Line<'static>> {
-    let accent = Style::default().fg(Color::Yellow);
+fn saved_comment_box(
+    comment: &ReviewComment,
+    number: usize,
+    selected: bool,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let color = if selected {
+        Color::Green
+    } else {
+        Color::Yellow
+    };
+    let accent = Style::default().fg(color);
     let mut lines = vec![Line::from(vec![
-        Span::styled("  ▎ ", accent),
+        Span::styled(if selected { "  ▸ " } else { "  ▎ " }, accent),
         Span::styled(
             format!("Review #{number}"),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!(" · {}:{}", comment.file, comment.line),
@@ -488,7 +520,7 @@ fn wrap_comment_body(body: &str, width: usize) -> Vec<String> {
         .collect()
 }
 
-fn inline_comment_box(buffer: &str, width: usize) -> Vec<Line<'static>> {
+fn inline_comment_box(buffer: &str, editing: bool, width: usize) -> Vec<Line<'static>> {
     let accent = Style::default().fg(Color::Cyan);
     let input = visible_comment_input(buffer, width);
 
@@ -496,7 +528,11 @@ fn inline_comment_box(buffer: &str, width: usize) -> Vec<Line<'static>> {
         Line::from(vec![
             Span::styled("  ▎ ", accent),
             Span::styled(
-                "Add review comment",
+                if editing {
+                    "Edit review comment"
+                } else {
+                    "Add review comment"
+                },
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
@@ -509,7 +545,11 @@ fn inline_comment_box(buffer: &str, width: usize) -> Vec<Line<'static>> {
         Line::from(vec![
             Span::styled("  ▎ ", accent),
             Span::styled(
-                "Enter save · Esc cancel",
+                if editing {
+                    "Enter update · Esc cancel"
+                } else {
+                    "Enter save · Esc cancel"
+                },
                 Style::default().fg(Color::DarkGray),
             ),
         ]),
@@ -769,7 +809,7 @@ mod tests {
 
     #[test]
     fn inline_comment_editor_uses_compact_accent_lines() {
-        let rendered = inline_comment_box("Please simplify this", 60);
+        let rendered = inline_comment_box("Please simplify this", false, 60);
 
         assert_eq!(rendered.len(), 3);
         assert!(
@@ -792,7 +832,7 @@ mod tests {
             body: "This comment is long enough to wrap".into(),
         };
 
-        let rendered = saved_comment_box(&comment, 1, 24);
+        let rendered = saved_comment_box(&comment, 1, false, 24);
 
         assert_eq!(rendered.len(), 3);
         assert!(

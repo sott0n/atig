@@ -93,8 +93,8 @@ below their exact diff lines and long comments wrap inside the review block.
 
 | Key | Action |
 | --- | --- |
-| `j`, `Down` | Move down one line |
-| `k`, `Up` | Move up one line |
+| `j`, `Down` | Move to the next diff line or inline comment |
+| `k`, `Up` | Move to the previous diff line or inline comment |
 | `J`, `K` | Move down or up 10 lines |
 | `Ctrl-d`, `Ctrl-u` | Move down or up half a screen |
 | `Ctrl-f`, `Ctrl-b` | Move down or up a full screen |
@@ -108,6 +108,7 @@ below their exact diff lines and long comments wrap inside the review block.
 | `/` | Search diff text |
 | `n`, `N` | Repeat the search forward or backward |
 | `a` | Add a comment to the selected diff line |
+| `Enter` | Edit the selected inline comment |
 | `v` | Open the review comment list |
 | `S` | Confirm and send all review comments |
 | `s` | Open the repository agent-session picker |
