@@ -307,7 +307,14 @@ fn draw_send_confirmation(frame: &mut Frame, app: &App, area: ratatui::layout::R
         .as_ref()
         .map(|target| target.label())
         .unwrap_or_else(|| "no target".into());
-    let prompt = format!("Send {} comments to {target}? [y/N]", app.comments.len());
+    let prompt = if let Some(index) = app.pending_send_comment_index() {
+        format!("Send Review #{} to {target}? [y/N]", index + 1)
+    } else {
+        format!(
+            "Send all {} comments to {target}? [y/N]",
+            app.comments.len()
+        )
+    };
     frame.render_widget(
         Paragraph::new(prompt).style(
             Style::default()
@@ -415,9 +422,10 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
     };
     let left = if let Some(comment_index) = app.diff_comment_selected {
         format!(
-            "Review #{} - Enter edit - {} comments{}",
+            "Review #{} - Enter edit  S send - {} comments{}{}",
             comment_index + 1,
             app.comments.len(),
+            if app.dispatching { " - sending" } else { "" },
             agent_target_suffix(app)
         )
     } else {

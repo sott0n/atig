@@ -75,6 +75,8 @@ pub struct App {
     pub sessions_loading: bool,
     comment_anchor: Option<CommentAnchor>,
     comment_edit_index: Option<usize>,
+    pending_send_comment_index: Option<usize>,
+    dispatched_comments: Vec<ReviewComment>,
     dispatch_rx: Option<Receiver<DispatchEvent>>,
     session_rx: Option<Receiver<SessionListEvent>>,
     help_return: View,
@@ -117,6 +119,8 @@ impl App {
             sessions_loading: false,
             comment_anchor: None,
             comment_edit_index: None,
+            pending_send_comment_index: None,
+            dispatched_comments: Vec::new(),
             dispatch_rx: None,
             session_rx: None,
             help_return: View::History,
@@ -584,7 +588,11 @@ impl App {
             self.message = "No comments".into();
             return;
         }
-        let removed = self.comment_selected;
+        self.remove_comment_at(self.comment_selected);
+        self.message = format!("{} review comments", self.comments.len());
+    }
+
+    fn remove_comment_at(&mut self, removed: usize) {
         self.comments.remove(removed);
         self.diff_comment_selected = match self.diff_comment_selected {
             Some(selected) if selected == removed => None,
@@ -594,7 +602,6 @@ impl App {
         self.comment_selected = self
             .comment_selected
             .min(self.comments.len().saturating_sub(1));
-        self.message = format!("{} review comments", self.comments.len());
     }
 
     pub fn request_send_review(&mut self) {
@@ -605,12 +612,23 @@ impl App {
         } else if self.comments.is_empty() {
             self.message = "No review comments to send".into();
         } else {
+            self.pending_send_comment_index = if self.view == View::Diff {
+                self.diff_comment_selected
+                    .filter(|&index| index < self.comments.len())
+            } else {
+                None
+            };
             self.input_mode = InputMode::ConfirmSend;
         }
     }
 
+    pub fn pending_send_comment_index(&self) -> Option<usize> {
+        self.pending_send_comment_index
+    }
+
     pub fn cancel_send_review(&mut self) {
         self.input_mode = InputMode::Normal;
+        self.pending_send_comment_index = None;
         self.message = "Review delivery cancelled".into();
     }
 
@@ -619,9 +637,16 @@ impl App {
             self.cancel_send_review();
             return;
         };
-        let prompt = format_review_request(&self.comments);
+        let comments = self
+            .pending_send_comment_index
+            .and_then(|index| self.comments.get(index).cloned())
+            .map(|comment| vec![comment])
+            .unwrap_or_else(|| self.comments.clone());
+        let prompt = format_review_request(&comments);
         let (tx, rx) = mpsc::channel();
         agent::dispatch(target, prompt, tx);
+        self.dispatched_comments = comments;
+        self.pending_send_comment_index = None;
         self.dispatch_rx = Some(rx);
         self.dispatching = true;
         self.input_mode = InputMode::Normal;
@@ -640,12 +665,23 @@ impl App {
         self.dispatching = false;
         match event {
             DispatchEvent::Done => {
-                self.comments.clear();
-                self.comment_selected = 0;
-                self.diff_comment_selected = None;
-                self.message = "Review delivered".into();
+                let delivered = std::mem::take(&mut self.dispatched_comments);
+                let delivered_count = delivered.len();
+                for comment in delivered {
+                    if let Some(index) = self.comments.iter().position(|item| item == &comment) {
+                        self.remove_comment_at(index);
+                    }
+                }
+                self.message = if delivered_count == 1 {
+                    "Review comment delivered".into()
+                } else {
+                    format!("{delivered_count} review comments delivered")
+                };
             }
-            DispatchEvent::Error(error) => self.message = error,
+            DispatchEvent::Error(error) => {
+                self.dispatched_comments.clear();
+                self.message = error;
+            }
         }
         true
     }
@@ -1254,6 +1290,65 @@ mod tests {
         let prompt = format_review_request(&app.comments);
         assert!(prompt.contains("src/main.rs:4"));
         assert!(prompt.contains("Handle this error"));
+    }
+
+    #[test]
+    fn selected_inline_comment_is_the_single_send_scope() {
+        let mut app = App::new();
+        app.view = View::Diff;
+        app.agent_target = Some(AgentTarget::parse("codex", "session-1").unwrap());
+        app.comments = vec![
+            ReviewComment {
+                commit: "abc123".into(),
+                file: "src/main.rs".into(),
+                line: 4,
+                diff_index: 3,
+                body: "First comment".into(),
+            },
+            ReviewComment {
+                commit: "abc123".into(),
+                file: "src/main.rs".into(),
+                line: 8,
+                diff_index: 7,
+                body: "Second comment".into(),
+            },
+        ];
+        app.diff_comment_selected = Some(1);
+
+        app.request_send_review();
+
+        assert_eq!(app.input_mode, InputMode::ConfirmSend);
+        assert_eq!(app.pending_send_comment_index(), Some(1));
+
+        app.cancel_send_review();
+        assert_eq!(app.pending_send_comment_index(), None);
+    }
+
+    #[test]
+    fn completed_single_send_removes_only_the_delivered_snapshot() {
+        let mut app = App::new();
+        let delivered = ReviewComment {
+            commit: "abc123".into(),
+            file: "src/main.rs".into(),
+            line: 4,
+            diff_index: 3,
+            body: "Delivered".into(),
+        };
+        let remaining = ReviewComment {
+            body: "Still pending".into(),
+            ..delivered.clone()
+        };
+        app.comments = vec![delivered.clone(), remaining.clone()];
+        app.dispatched_comments = vec![delivered];
+        app.dispatching = true;
+        let (tx, rx) = mpsc::channel();
+        tx.send(DispatchEvent::Done).unwrap();
+        app.dispatch_rx = Some(rx);
+
+        assert!(app.drain_dispatch_events());
+
+        assert_eq!(app.comments, [remaining]);
+        assert_eq!(app.message, "Review comment delivered");
     }
 
     #[test]

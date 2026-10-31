@@ -110,7 +110,7 @@ below their exact diff lines and long comments wrap inside the review block.
 | `a` | Add a comment to the selected diff line |
 | `Enter` | Edit the selected inline comment |
 | `v` | Open the review comment list |
-| `S` | Confirm and send all review comments |
+| `S` | Send the selected inline comment, or all comments when a code line is selected |
 | `s` | Open the repository agent-session picker |
 | `r` | Reload the current commit diff |
 | `:` | Open command input |
