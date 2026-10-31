@@ -93,17 +93,28 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
 fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
     let height = areas[0].height as usize;
+    let start = app
+        .diff_scroll
+        .min(app.diff.len().saturating_sub(height.max(1)));
     let lines = app
         .diff
         .iter()
+        .skip(start)
         .take(height)
         .map(|line| Line::raw(line.clone()))
         .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(Text::from(lines)), areas[0]);
 
     let oid = app.diff_oid.as_deref().unwrap_or("-");
-    let left = format!("commit {oid}");
-    let right = if app.diff_loading { "loading" } else { "100%" };
+    let position = if app.diff.is_empty() { 0 } else { start + 1 };
+    let left = format!("commit {oid} - line {position} of {}", app.diff.len());
+    let right = if app.diff_loading {
+        "loading".to_string()
+    } else if app.diff.is_empty() {
+        "0%".to_string()
+    } else {
+        format!("{}%", (position * 100) / app.diff.len())
+    };
     let gap = (areas[1].width as usize).saturating_sub(left.chars().count() + right.len());
     frame.render_widget(
         Paragraph::new(format!("{left}{}{right}", " ".repeat(gap))).style(

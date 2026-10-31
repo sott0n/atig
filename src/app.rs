@@ -28,6 +28,7 @@ pub struct App {
     pub diff: Vec<String>,
     pub diff_oid: Option<String>,
     pub diff_loading: bool,
+    pub diff_scroll: usize,
     history_rx: Option<Receiver<HistoryEvent>>,
     diff_rx: Option<Receiver<DiffEvent>>,
     pending_graph: Option<String>,
@@ -49,6 +50,7 @@ impl App {
             diff: Vec::new(),
             diff_oid: None,
             diff_loading: false,
+            diff_scroll: 0,
             history_rx: None,
             diff_rx: None,
             pending_graph: None,
@@ -70,14 +72,42 @@ impl App {
         self.diff.clear();
         self.diff_oid = Some(oid);
         self.diff_loading = true;
+        self.diff_scroll = 0;
         self.diff_rx = Some(rx);
         self.message = "Loading commit diff...".into();
     }
 
     pub fn close_diff(&mut self) {
         self.view = View::History;
+        self.pending_g = false;
         self.diff_rx = None;
         self.diff_loading = false;
+    }
+
+    pub fn move_diff(&mut self, amount: isize) {
+        self.pending_g = false;
+        if amount < 0 {
+            self.diff_scroll = self.diff_scroll.saturating_sub(amount.unsigned_abs());
+        } else {
+            self.diff_scroll = self
+                .diff_scroll
+                .saturating_add(amount as usize)
+                .min(self.diff.len().saturating_sub(1));
+        }
+    }
+
+    pub fn handle_diff_g(&mut self) {
+        if self.pending_g {
+            self.diff_scroll = 0;
+            self.pending_g = false;
+        } else {
+            self.pending_g = true;
+        }
+    }
+
+    pub fn select_diff_end(&mut self) {
+        self.pending_g = false;
+        self.diff_scroll = self.diff.len().saturating_sub(1);
     }
 
     pub fn drain_diff_events(&mut self) -> bool {
@@ -338,5 +368,22 @@ mod tests {
 
         assert_eq!(app.revisions, ["--all", "main..feature"]);
         assert_eq!(app.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn diff_navigation_is_bounded_and_supports_gg() {
+        let mut app = App::new();
+        app.diff = (0..20).map(|line| line.to_string()).collect();
+
+        app.move_diff(10);
+        app.move_diff(100);
+        assert_eq!(app.diff_scroll, 19);
+
+        app.handle_diff_g();
+        app.handle_diff_g();
+        assert_eq!(app.diff_scroll, 0);
+
+        app.move_diff(-1);
+        assert_eq!(app.diff_scroll, 0);
     }
 }

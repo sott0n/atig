@@ -11,6 +11,7 @@ The first development slice provides a streaming Git history view:
 - :log <revision...> reloads the view with a Git revision specification.
 - :reload, :help, and :q provide the initial command interface.
 - Enter opens the selected commit; Esc or q returns to history.
+- The same j/k, gg/G, and Ctrl-d/Ctrl-u navigation works in commit diffs.
 
 ## Development
 

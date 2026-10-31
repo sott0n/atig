@@ -48,10 +48,15 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
         needs_draw = true;
 
         if app.view == View::Diff {
-            if let (KeyCode::Esc | KeyCode::Char('q'), KeyModifiers::NONE) =
-                (key.code, key.modifiers)
-            {
-                app.close_diff();
+            match (key.code, key.modifiers) {
+                (KeyCode::Esc | KeyCode::Char('q'), KeyModifiers::NONE) => app.close_diff(),
+                (KeyCode::Char('j') | KeyCode::Down, KeyModifiers::NONE) => app.move_diff(1),
+                (KeyCode::Char('k') | KeyCode::Up, KeyModifiers::NONE) => app.move_diff(-1),
+                (KeyCode::Char('d'), KeyModifiers::CONTROL) => app.move_diff(10),
+                (KeyCode::Char('u'), KeyModifiers::CONTROL) => app.move_diff(-10),
+                (KeyCode::Char('G'), KeyModifiers::SHIFT) => app.select_diff_end(),
+                (KeyCode::Char('g'), KeyModifiers::NONE) => app.handle_diff_g(),
+                _ => app.pending_g = false,
             }
             continue;
         }
