@@ -30,8 +30,14 @@ pub enum DiffTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AgentReply {
-    pub agent: String,
+pub enum ReviewThreadRole {
+    Human,
+    Agent(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewThreadMessage {
+    pub role: ReviewThreadRole,
     pub body: String,
 }
 
@@ -42,7 +48,7 @@ pub struct ReviewComment {
     pub line: usize,
     pub diff_index: usize,
     pub body: String,
-    pub reply: Option<AgentReply>,
+    pub thread: Vec<ReviewThreadMessage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +75,7 @@ pub struct App {
     pub diff_loading: bool,
     pub diff_scroll: usize,
     pub diff_comment_selected: Option<usize>,
+    pub diff_thread_selected: Option<usize>,
     pub diff_jump_direction: Option<isize>,
     pub comments: Vec<ReviewComment>,
     pub comment_buffer: String,
@@ -83,6 +90,7 @@ pub struct App {
     pub sessions_loading: bool,
     comment_anchor: Option<CommentAnchor>,
     comment_edit_index: Option<usize>,
+    comment_followup_index: Option<usize>,
     pending_send_comment_index: Option<usize>,
     dispatched_comments: Vec<ReviewComment>,
     dispatched_agent: Option<String>,
@@ -115,6 +123,7 @@ impl App {
             diff_loading: false,
             diff_scroll: 0,
             diff_comment_selected: None,
+            diff_thread_selected: None,
             diff_jump_direction: None,
             comments: Vec::new(),
             comment_buffer: String::new(),
@@ -129,6 +138,7 @@ impl App {
             sessions_loading: false,
             comment_anchor: None,
             comment_edit_index: None,
+            comment_followup_index: None,
             pending_send_comment_index: None,
             dispatched_comments: Vec::new(),
             dispatched_agent: None,
@@ -164,6 +174,7 @@ impl App {
         self.diff_loading = true;
         self.diff_scroll = 0;
         self.diff_comment_selected = None;
+        self.diff_thread_selected = None;
         self.diff_jump_direction = None;
         self.diff_rx = Some(rx);
         self.message = "Loading commit diff...".into();
@@ -172,6 +183,7 @@ impl App {
     pub fn close_diff(&mut self) {
         self.view = View::History;
         self.diff_comment_selected = None;
+        self.diff_thread_selected = None;
         self.pending_g = false;
         self.diff_jump_direction = None;
         self.diff_rx = None;
@@ -193,6 +205,7 @@ impl App {
         self.diff.clear();
         self.diff_scroll = 0;
         self.diff_comment_selected = None;
+        self.diff_thread_selected = None;
         self.diff_loading = true;
         self.diff_rx = Some(rx);
         self.message = "Reloading commit diff...".into();
@@ -332,6 +345,7 @@ impl App {
             (View::Diff, Some(index)) => {
                 self.diff_scroll = index;
                 self.diff_comment_selected = None;
+                self.diff_thread_selected = None;
             }
             (_, Some(_)) => {}
             (_, None) => self.message = format!("Pattern not found: {}", self.search_query),
@@ -341,6 +355,7 @@ impl App {
     pub fn move_diff(&mut self, amount: isize) {
         self.pending_g = false;
         self.diff_comment_selected = None;
+        self.diff_thread_selected = None;
         if amount < 0 {
             self.diff_scroll = self.diff_scroll.saturating_sub(amount.unsigned_abs());
         } else {
@@ -355,14 +370,24 @@ impl App {
         self.pending_g = false;
         if direction > 0 {
             if let Some(selected) = self.diff_comment_selected {
-                if let Some(next) = self
+                let thread_len = self.comments[selected].thread.len();
+                if self
+                    .diff_thread_selected
+                    .is_some_and(|thread| thread + 1 < thread_len)
+                {
+                    self.diff_thread_selected = self.diff_thread_selected.map(|thread| thread + 1);
+                } else if self.diff_thread_selected.is_none() && thread_len > 0 {
+                    self.diff_thread_selected = Some(0);
+                } else if let Some(next) = self
                     .comment_indices_at_diff_line(self.diff_scroll)
                     .into_iter()
                     .find(|&index| index > selected)
                 {
                     self.diff_comment_selected = Some(next);
+                    self.diff_thread_selected = None;
                 } else {
                     self.diff_comment_selected = None;
+                    self.diff_thread_selected = None;
                     self.diff_scroll = self
                         .diff_scroll
                         .saturating_add(1)
@@ -374,6 +399,7 @@ impl App {
                 .next()
             {
                 self.diff_comment_selected = Some(first);
+                self.diff_thread_selected = None;
             } else {
                 self.diff_scroll = self
                     .diff_scroll
@@ -381,18 +407,34 @@ impl App {
                     .min(self.diff.len().saturating_sub(1));
             }
         } else if let Some(selected) = self.diff_comment_selected {
-            self.diff_comment_selected = self
+            if let Some(thread) = self.diff_thread_selected {
+                self.diff_thread_selected = thread.checked_sub(1);
+            } else if let Some(previous) = self
                 .comment_indices_at_diff_line(self.diff_scroll)
                 .into_iter()
                 .rev()
-                .find(|&index| index < selected);
+                .find(|&index| index < selected)
+            {
+                self.select_end_of_comment(previous);
+            } else {
+                self.diff_comment_selected = None;
+                self.diff_thread_selected = None;
+            }
         } else if self.diff_scroll > 0 {
             self.diff_scroll -= 1;
-            self.diff_comment_selected = self
+            if let Some(last) = self
                 .comment_indices_at_diff_line(self.diff_scroll)
                 .into_iter()
-                .next_back();
+                .next_back()
+            {
+                self.select_end_of_comment(last);
+            }
         }
+    }
+
+    fn select_end_of_comment(&mut self, comment_index: usize) {
+        self.diff_comment_selected = Some(comment_index);
+        self.diff_thread_selected = self.comments[comment_index].thread.len().checked_sub(1);
     }
 
     fn comment_indices_at_diff_line(&self, diff_index: usize) -> Vec<usize> {
@@ -411,6 +453,7 @@ impl App {
         if self.pending_g {
             self.diff_scroll = 0;
             self.diff_comment_selected = None;
+            self.diff_thread_selected = None;
             self.pending_g = false;
         } else {
             self.pending_g = true;
@@ -421,11 +464,13 @@ impl App {
         self.pending_g = false;
         self.diff_scroll = self.diff.len().saturating_sub(1);
         self.diff_comment_selected = None;
+        self.diff_thread_selected = None;
     }
 
     pub fn begin_diff_jump(&mut self, direction: isize) {
         self.pending_g = false;
         self.diff_comment_selected = None;
+        self.diff_thread_selected = None;
         self.diff_jump_direction = Some(direction.signum());
     }
 
@@ -477,6 +522,7 @@ impl App {
         }
         self.diff_scroll = line.saturating_sub(1).min(self.diff.len() - 1);
         self.diff_comment_selected = None;
+        self.diff_thread_selected = None;
         self.message = format!("Line {}", self.diff_scroll + 1);
     }
 
@@ -510,6 +556,7 @@ impl App {
         self.comment_buffer.clear();
         self.comment_anchor = None;
         self.comment_edit_index = None;
+        self.comment_followup_index = None;
         self.input_mode = InputMode::Normal;
     }
 
@@ -523,11 +570,24 @@ impl App {
         if let Some(index) = self.comment_edit_index.take() {
             if let Some(comment) = self.comments.get_mut(index) {
                 comment.body = body;
-                comment.reply = None;
             }
             self.comment_buffer.clear();
             self.input_mode = InputMode::Normal;
             self.message = "Comment updated".into();
+            return;
+        }
+        if let Some(index) = self.comment_followup_index.take() {
+            if let Some(comment) = self.comments.get_mut(index) {
+                comment.thread.push(ReviewThreadMessage {
+                    role: ReviewThreadRole::Human,
+                    body,
+                });
+                self.diff_comment_selected = Some(index);
+                self.diff_thread_selected = comment.thread.len().checked_sub(1);
+            }
+            self.comment_buffer.clear();
+            self.input_mode = InputMode::Normal;
+            self.message = "Follow-up added".into();
             return;
         }
         let Some(anchor) = self.comment_anchor.take() else {
@@ -541,9 +601,10 @@ impl App {
             line: anchor.line,
             diff_index: anchor.diff_index,
             body,
-            reply: None,
+            thread: Vec::new(),
         });
         self.diff_comment_selected = Some(comment_index);
+        self.diff_thread_selected = None;
         self.comment_buffer.clear();
         self.input_mode = InputMode::Normal;
         self.message = format!("{} review comments", self.comments.len());
@@ -561,6 +622,7 @@ impl App {
         self.input_mode = InputMode::Normal;
         self.comment_buffer.clear();
         self.comment_edit_index = None;
+        self.comment_followup_index = None;
     }
 
     pub fn move_comment_selection(&mut self, amount: isize) {
@@ -588,12 +650,22 @@ impl App {
         let Some(index) = self.diff_comment_selected else {
             return;
         };
+        if self.diff_thread_selected.is_some() {
+            self.comment_buffer.clear();
+            self.comment_followup_index = Some(index);
+            self.input_mode = InputMode::Comment;
+            return;
+        }
         self.comment_selected = index;
         self.edit_selected_comment();
     }
 
     pub fn editing_comment_index(&self) -> Option<usize> {
         self.comment_edit_index
+    }
+
+    pub fn followup_comment_index(&self) -> Option<usize> {
+        self.comment_followup_index
     }
 
     pub fn delete_selected_comment(&mut self) {
@@ -612,6 +684,9 @@ impl App {
             Some(selected) if selected > removed => Some(selected - 1),
             selected => selected,
         };
+        if self.diff_comment_selected.is_none() {
+            self.diff_thread_selected = None;
+        }
         self.comment_selected = self
             .comment_selected
             .min(self.comments.len().saturating_sub(1));
@@ -694,15 +769,26 @@ impl App {
                     .dispatched_agent
                     .take()
                     .unwrap_or_else(|| "agent".into());
-                let mut attached = 0;
+                let mut attached_indices = Vec::new();
                 for comment in delivered {
-                    if let Some(item) = self.comments.iter_mut().find(|item| **item == comment) {
-                        item.reply = Some(AgentReply {
-                            agent: agent.clone(),
+                    if let Some((index, item)) = self
+                        .comments
+                        .iter_mut()
+                        .enumerate()
+                        .find(|(_, item)| **item == comment)
+                    {
+                        item.thread.push(ReviewThreadMessage {
+                            role: ReviewThreadRole::Agent(agent.clone()),
                             body: response.clone(),
                         });
-                        attached += 1;
+                        attached_indices.push(index);
                     }
+                }
+                let attached = attached_indices.len();
+                if let [index] = attached_indices.as_slice() {
+                    self.diff_scroll = self.comments[*index].diff_index;
+                    self.diff_comment_selected = Some(*index);
+                    self.diff_thread_selected = self.comments[*index].thread.len().checked_sub(1);
                 }
                 self.message = if attached == 1 {
                     "Agent response received".into()
@@ -1070,13 +1156,21 @@ fn format_review_request(comments: &[ReviewComment]) -> String {
     );
     for (index, comment) in comments.iter().enumerate() {
         prompt.push_str(&format!(
-            "{}. Commit: {}\n   Location: {}:{}\n   Comment: {}\n\n",
+            "{}. Commit: {}\n   Location: {}:{}\n   Human review: {}\n",
             index + 1,
             comment.commit,
             comment.file,
             comment.line,
             comment.body
         ));
+        for message in &comment.thread {
+            let author = match &message.role {
+                ReviewThreadRole::Human => "Human follow-up".to_string(),
+                ReviewThreadRole::Agent(agent) => format!("Agent response ({agent})"),
+            };
+            prompt.push_str(&format!("   {author}: {}\n", message.body));
+        }
+        prompt.push('\n');
     }
     prompt
 }
@@ -1187,7 +1281,7 @@ mod tests {
             line: 1,
             diff_index: 0,
             body: "Please simplify".into(),
-            reply: None,
+            thread: Vec::new(),
         }];
 
         app.move_diff_cursor(1);
@@ -1207,6 +1301,47 @@ mod tests {
         app.move_diff_cursor(-1);
         assert_eq!(app.diff_scroll, 0);
         assert_eq!(app.diff_comment_selected, Some(0));
+    }
+
+    #[test]
+    fn agent_response_accepts_a_follow_up_and_sends_the_thread_context() {
+        let mut app = App::new();
+        app.diff_oid = Some("abc123".into());
+        app.diff = vec!["+changed".into()];
+        app.comments = vec![ReviewComment {
+            commit: "abc123".into(),
+            file: "src/main.rs".into(),
+            line: 1,
+            diff_index: 0,
+            body: "Please simplify".into(),
+            thread: vec![ReviewThreadMessage {
+                role: ReviewThreadRole::Agent("codex:session-1".into()),
+                body: "Implemented the simpler version.".into(),
+            }],
+        }];
+
+        app.move_diff_cursor(1);
+        app.move_diff_cursor(1);
+        assert_eq!(app.diff_comment_selected, Some(0));
+        assert_eq!(app.diff_thread_selected, Some(0));
+
+        app.edit_inline_comment();
+        assert_eq!(app.followup_comment_index(), Some(0));
+        app.comment_buffer = "Please keep the original error text.".into();
+        app.submit_comment();
+
+        assert_eq!(
+            app.comments[0].thread[1],
+            ReviewThreadMessage {
+                role: ReviewThreadRole::Human,
+                body: "Please keep the original error text.".into(),
+            }
+        );
+        assert_eq!(app.diff_thread_selected, Some(1));
+
+        let prompt = format_review_request(&app.comments);
+        assert!(prompt.contains("Agent response (codex:session-1): Implemented"));
+        assert!(prompt.contains("Human follow-up: Please keep"));
     }
 
     #[test]
@@ -1280,7 +1415,7 @@ mod tests {
                 line: 11,
                 diff_index: 5,
                 body: "Please simplify".into(),
-                reply: None,
+                thread: Vec::new(),
             }]
         );
         assert_eq!(app.input_mode, InputMode::Normal);
@@ -1295,7 +1430,7 @@ mod tests {
             line: 11,
             diff_index: 5,
             body: "Old body".into(),
-            reply: None,
+            thread: Vec::new(),
         });
 
         app.edit_selected_comment();
@@ -1325,7 +1460,7 @@ mod tests {
             line: 4,
             diff_index: 3,
             body: "Handle this error".into(),
-            reply: None,
+            thread: Vec::new(),
         });
         app.request_send_review();
         assert_eq!(app.input_mode, InputMode::ConfirmSend);
@@ -1347,7 +1482,7 @@ mod tests {
                 line: 4,
                 diff_index: 3,
                 body: "First comment".into(),
-                reply: None,
+                thread: Vec::new(),
             },
             ReviewComment {
                 commit: "abc123".into(),
@@ -1355,7 +1490,7 @@ mod tests {
                 line: 8,
                 diff_index: 7,
                 body: "Second comment".into(),
-                reply: None,
+                thread: Vec::new(),
             },
         ];
         app.diff_comment_selected = Some(1);
@@ -1378,7 +1513,7 @@ mod tests {
             line: 4,
             diff_index: 3,
             body: "Delivered".into(),
-            reply: None,
+            thread: Vec::new(),
         };
         let remaining = ReviewComment {
             body: "Still pending".into(),
@@ -1398,12 +1533,14 @@ mod tests {
         assert_eq!(app.comments.len(), 2);
         assert_eq!(app.comments[1], remaining);
         assert_eq!(
-            app.comments[0].reply,
-            Some(AgentReply {
-                agent: "codex:session-1".into(),
+            app.comments[0].thread,
+            [ReviewThreadMessage {
+                role: ReviewThreadRole::Agent("codex:session-1".into()),
                 body: "Implemented and tested.".into(),
-            })
+            }]
         );
+        assert_eq!(app.diff_comment_selected, Some(0));
+        assert_eq!(app.diff_thread_selected, Some(0));
         assert_eq!(app.message, "Agent response received");
     }
 

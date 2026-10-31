@@ -110,7 +110,7 @@ the selected agent session.
 | `/` | Search diff text |
 | `n`, `N` | Repeat the search forward or backward |
 | `a` | Add a comment to the selected diff line |
-| `Enter` | Edit the selected inline comment |
+| `Enter` | Edit a review comment, or reply to a selected thread message |
 | `v` | Open the review comment list |
 | `S` | Send the selected inline comment, or all comments when a code line is selected |
 | `s` | Open the repository agent-session picker |
@@ -183,9 +183,10 @@ the reviewed changes, run relevant tests, and avoid committing or pushing.
 Sub-agent creation is ultimately controlled by the target agent and its
 configuration.
 
-After the CLI finishes, its text response is shown directly below the review
-comment as an `Agent response` block. The comment remains available for
-follow-up edits or another send.
+After the CLI finishes, its response is appended to the inline review thread.
+Use `j`/`k` to select the Agent response, press `Enter` to write a follow-up,
+then press `S` on that thread to send the complete conversation context back
+to the selected Agent session.
 
 Delivery is deliberately conservative:
 

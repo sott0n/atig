@@ -170,6 +170,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 (KeyCode::Home, _) => {
                     app.diff_scroll = 0;
                     app.diff_comment_selected = None;
+                    app.diff_thread_selected = None;
                     app.pending_g = false;
                 }
                 (KeyCode::End, _) => app.select_diff_end(),

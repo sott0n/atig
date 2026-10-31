@@ -6,7 +6,7 @@ use ratatui::{
     widgets::Paragraph,
 };
 
-use crate::app::{App, InputMode, ReviewComment, View};
+use crate::app::{App, InputMode, ReviewComment, ReviewThreadRole, View};
 use crate::git::{CommitLine, HistoryLine, fit_column, format_refs};
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -117,7 +117,7 @@ fn draw_help(frame: &mut Frame, areas: &[ratatui::layout::Rect]) {
         "Ctrl-f / Ctrl-b   full page down / up",
         "PgDn / PgUp       full page down / up",
         "J / K             move 10 lines",
-        "Enter             open commit / edit inline comment",
+        "Enter             open / edit / reply",
         "Esc, q            back",
         "[f / ]f, Tab       previous / next file",
         "[c / ]c, { / }     previous / next change",
@@ -351,11 +351,12 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
             app.diff_scroll == index && app.diff_comment_selected.is_none(),
             areas[0].width as usize,
         ));
-        if commenting && app.diff_scroll == index {
+        if commenting && app.diff_scroll == index && app.followup_comment_index().is_none() {
             comment_input_row = Some(lines.len() + 1);
             lines.extend(inline_comment_box(
                 &app.comment_buffer,
                 app.editing_comment_index().is_some(),
+                false,
                 areas[0].width as usize,
             ));
         }
@@ -363,9 +364,19 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
             lines.extend(saved_comment_box(
                 comment,
                 comment_index + 1,
-                app.diff_comment_selected == Some(comment_index),
+                (app.diff_comment_selected == Some(comment_index))
+                    .then_some(app.diff_thread_selected),
                 areas[0].width as usize,
             ));
+            if app.followup_comment_index() == Some(comment_index) {
+                comment_input_row = Some(lines.len() + 1);
+                lines.extend(inline_comment_box(
+                    &app.comment_buffer,
+                    false,
+                    true,
+                    areas[0].width as usize,
+                ));
+            }
         }
     }
     lines.truncate(height);
@@ -425,8 +436,13 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
     let left = if let Some(message) = &app.delivery_message {
         message.clone()
     } else if let Some(comment_index) = app.diff_comment_selected {
+        let action = if app.diff_thread_selected.is_some() {
+            "Enter reply"
+        } else {
+            "Enter edit  S send"
+        };
         format!(
-            "Review #{} - Enter edit  S send - {} comments{}{}",
+            "Review #{:02} - {action} - {} comments{}{}",
             comment_index + 1,
             app.comments.len(),
             if app.dispatching { " - sending" } else { "" },
@@ -480,7 +496,8 @@ fn rendered_diff_row_height(app: &App, diff_index: usize, width: usize) -> usize
             saved_comment_box(
                 comment,
                 comment_index + 1,
-                app.diff_comment_selected == Some(comment_index),
+                (app.diff_comment_selected == Some(comment_index))
+                    .then_some(app.diff_thread_selected),
                 width,
             )
             .len()
@@ -491,55 +508,56 @@ fn rendered_diff_row_height(app: &App, diff_index: usize, width: usize) -> usize
 fn saved_comment_box(
     comment: &ReviewComment,
     number: usize,
-    selected: bool,
+    selection: Option<Option<usize>>,
     width: usize,
 ) -> Vec<Line<'static>> {
-    let color = if selected {
+    let root_selected = selection == Some(None);
+    let root_color = if root_selected {
         Color::Green
     } else {
         Color::Yellow
     };
-    let accent = Style::default().fg(color);
     let mut lines = vec![Line::from(vec![
-        Span::styled(if selected { "  ▸ " } else { "  ▎ " }, accent),
         Span::styled(
-            format!("Review #{number}"),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
+            if root_selected { "  ▶ " } else { "  ● " },
+            Style::default().fg(root_color),
+        ),
+        Span::styled(
+            format!("REVIEW {number:02}"),
+            Style::default().fg(root_color).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!(" · {}:{}", comment.file, comment.line),
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::styled(
-            "  Enter edit · S send",
             Style::default().fg(Color::DarkGray),
         ),
     ])];
     let content_width = width.saturating_sub(4).max(1);
     for chunk in wrap_comment_body(&comment.body, content_width) {
         lines.push(Line::from(vec![
-            Span::styled("  ▎ ", accent),
+            Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
             Span::styled(chunk, Style::default().fg(Color::White)),
         ]));
     }
-    if let Some(reply) = &comment.reply {
-        let reply_accent = Style::default().fg(Color::Blue);
+    for (thread_index, message) in comment.thread.iter().enumerate() {
+        let selected = selection == Some(Some(thread_index));
+        let (label, role_color, marker) = match &message.role {
+            ReviewThreadRole::Human => ("YOU".to_string(), Color::Cyan, "  ● "),
+            ReviewThreadRole::Agent(agent) => (format!("AGENT · {agent}"), Color::Magenta, "  ◆ "),
+        };
+        let color = if selected { Color::Green } else { role_color };
         lines.push(Line::from(vec![
-            Span::styled("  ┆ ", reply_accent),
             Span::styled(
-                "Agent response",
-                Style::default()
-                    .fg(Color::Blue)
-                    .add_modifier(Modifier::BOLD),
+                if selected { "  ▶ " } else { marker },
+                Style::default().fg(color),
             ),
             Span::styled(
-                format!(" · {}", reply.agent),
-                Style::default().fg(Color::DarkGray),
+                label,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
         ]));
-        for chunk in wrap_comment_body(&reply.body, content_width) {
+        for chunk in wrap_comment_body(&message.body, content_width) {
             lines.push(Line::from(vec![
-                Span::styled("  ┆ ", reply_accent),
+                Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
                 Span::styled(chunk, Style::default().fg(Color::White)),
             ]));
         }
@@ -568,33 +586,42 @@ fn wrap_comment_body(body: &str, width: usize) -> Vec<String> {
     wrapped
 }
 
-fn inline_comment_box(buffer: &str, editing: bool, width: usize) -> Vec<Line<'static>> {
-    let accent = Style::default().fg(Color::Cyan);
+fn inline_comment_box(
+    buffer: &str,
+    editing: bool,
+    followup: bool,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let accent = Style::default().fg(Color::Green);
     let input = visible_comment_input(buffer, width);
 
     vec![
         Line::from(vec![
-            Span::styled("  ▎ ", accent),
+            Span::styled("  ▶ ", accent),
             Span::styled(
-                if editing {
+                if followup {
+                    "REPLY TO AGENT"
+                } else if editing {
                     "Edit review comment"
                 } else {
-                    "Add review comment"
+                    "NEW REVIEW"
                 },
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
-            Span::styled("  ▎ ", accent),
+            Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
             Span::styled(input, Style::default().fg(Color::White)),
         ]),
         Line::from(vec![
-            Span::styled("  ▎ ", accent),
+            Span::styled("  └ ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 if editing {
                     "Enter update · Esc cancel"
+                } else if followup {
+                    "Enter add reply · S sends thread · Esc cancel"
                 } else {
                     "Enter save · then S send · Esc cancel"
                 },
@@ -857,15 +884,15 @@ mod tests {
 
     #[test]
     fn inline_comment_editor_uses_compact_accent_lines() {
-        let rendered = inline_comment_box("Please simplify this", false, 60);
+        let rendered = inline_comment_box("Please simplify this", false, false, 60);
 
         assert_eq!(rendered.len(), 3);
         assert!(
             rendered
                 .iter()
-                .all(|line| line.to_string().starts_with("  ▎ "))
+                .all(|line| line.to_string().starts_with("  "))
         );
-        assert!(rendered[0].to_string().contains("Add review comment"));
+        assert!(rendered[0].to_string().contains("NEW REVIEW"));
         assert!(rendered[1].to_string().contains("Please simplify this"));
         assert!(
             rendered[2]
@@ -882,23 +909,22 @@ mod tests {
             line: 12,
             diff_index: 5,
             body: "This comment is long enough to wrap".into(),
-            reply: None,
+            thread: Vec::new(),
         };
 
-        let rendered = saved_comment_box(&comment, 1, false, 24);
+        let rendered = saved_comment_box(&comment, 1, None, 24);
 
         assert_eq!(rendered.len(), 3);
         assert!(
             rendered
                 .iter()
-                .all(|line| line.to_string().starts_with("  ▎ "))
+                .all(|line| line.to_string().starts_with("  "))
         );
         assert!(
             rendered[0]
                 .to_string()
-                .contains("Review #1 · src/main.rs:12")
+                .contains("REVIEW 01 · src/main.rs:12")
         );
-        assert!(rendered[0].to_string().contains("Enter edit · S send"));
     }
 
     #[test]
@@ -914,21 +940,34 @@ mod tests {
             line: 12,
             diff_index: 5,
             body: "Please simplify".into(),
-            reply: Some(crate::app::AgentReply {
-                agent: "codex:session-1".into(),
+            thread: vec![crate::app::ReviewThreadMessage {
+                role: ReviewThreadRole::Agent("codex:session-1".into()),
                 body: "Implemented.\nTests pass.".into(),
-            }),
+            }],
         };
 
-        let rendered = saved_comment_box(&comment, 1, false, 60);
+        let rendered = saved_comment_box(&comment, 1, Some(Some(0)), 60);
         let text = rendered
             .iter()
             .map(Line::to_string)
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(text.contains("Agent response · codex:session-1"));
+        assert!(text.contains("AGENT · codex:session-1"));
         assert!(text.contains("Implemented."));
         assert!(text.contains("Tests pass."));
+    }
+
+    #[test]
+    fn agent_follow_up_editor_names_the_thread_action() {
+        let rendered = inline_comment_box("One more change", false, true, 60);
+        let text = rendered
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("REPLY TO AGENT"));
+        assert!(text.contains("S sends thread"));
     }
 }
