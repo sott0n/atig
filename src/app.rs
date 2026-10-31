@@ -1,5 +1,6 @@
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
+use crate::agent::AgentTarget;
 use crate::git::{self, DiffEvent, HistoryEvent, HistoryLine};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +57,7 @@ pub struct App {
     pub comments: Vec<ReviewComment>,
     pub comment_buffer: String,
     pub comment_selected: usize,
+    pub agent_target: Option<AgentTarget>,
     comment_anchor: Option<CommentAnchor>,
     comment_edit_index: Option<usize>,
     history_rx: Option<Receiver<HistoryEvent>>,
@@ -84,6 +86,7 @@ impl App {
             comments: Vec::new(),
             comment_buffer: String::new(),
             comment_selected: 0,
+            agent_target: None,
             comment_anchor: None,
             comment_edit_index: None,
             history_rx: None,
@@ -466,8 +469,25 @@ impl App {
                 self.revisions = parts.map(str::to_owned).collect();
                 self.reload();
             }
+            Some("session") => match (parts.next(), parts.next(), parts.next()) {
+                (Some("clear"), None, None) => {
+                    self.agent_target = None;
+                    self.message = "Agent session cleared".into();
+                }
+                (Some(provider), Some(session_id), None) => {
+                    match AgentTarget::parse(provider, session_id) {
+                        Ok(target) => {
+                            self.message = format!("Agent session: {}", target.label());
+                            self.agent_target = Some(target);
+                        }
+                        Err(error) => self.message = error,
+                    }
+                }
+                _ => self.message = "Usage: :session <codex|claude|other> <id>".into(),
+            },
             Some("help") => {
-                self.message = "j/k move  gg/G ends  Ctrl-d/u page  :log <rev>  :q quit".into();
+                self.message =
+                    "j/k move  gg/G ends  Enter diff  :session <provider> <id>  :q quit".into();
             }
             Some(other) => self.message = format!("Unknown command: {other}"),
             None => {}
@@ -607,6 +627,20 @@ mod tests {
 
         assert_eq!(app.revisions, ["--all", "main..feature"]);
         assert_eq!(app.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn session_command_sets_validated_agent_target() {
+        let mut app = App::new();
+        app.input_mode = InputMode::Command;
+        app.command = "session codex 019a-session".into();
+
+        app.submit_command();
+
+        assert_eq!(
+            app.agent_target.as_ref().map(AgentTarget::label),
+            Some("codex:019a-session".into())
+        );
     }
 
     #[test]

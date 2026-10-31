@@ -162,6 +162,17 @@ fn draw_comment_prompt(frame: &mut Frame, app: &App, area: ratatui::layout::Rect
     frame.set_cursor_position((cursor_x, area.y));
 }
 
+fn draw_command_prompt(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let prompt = format!(":{}", app.command);
+    frame.render_widget(Paragraph::new(prompt), area);
+    let cursor_x = area
+        .x
+        .saturating_add(1)
+        .saturating_add(app.command.chars().count() as u16)
+        .min(area.right().saturating_sub(1));
+    frame.set_cursor_position((cursor_x, area.y));
+}
+
 fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
     let height = areas[0].height as usize;
     let start = diff_viewport_start(app, height);
@@ -175,6 +186,10 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
         .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(Text::from(lines)), areas[0]);
 
+    if app.input_mode == InputMode::Command {
+        draw_command_prompt(frame, app, areas[1]);
+        return;
+    }
     if app.input_mode == InputMode::Comment {
         draw_comment_prompt(frame, app, areas[1]);
         return;

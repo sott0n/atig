@@ -1,3 +1,4 @@
+mod agent;
 mod app;
 mod git;
 mod ui;
@@ -74,6 +75,16 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
         }
 
         if app.view == View::Diff {
+            if app.input_mode == InputMode::Command {
+                match key.code {
+                    KeyCode::Esc => app.cancel_command(),
+                    KeyCode::Enter => app.submit_command(),
+                    KeyCode::Backspace => app.command_backspace(),
+                    KeyCode::Char(character) => app.command_push(character),
+                    _ => {}
+                }
+                continue;
+            }
             if app.input_mode == InputMode::Comment {
                 match key.code {
                     KeyCode::Esc => app.cancel_comment(),
@@ -102,6 +113,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 }
                 (KeyCode::Char('a'), KeyModifiers::NONE) => app.start_comment(),
                 (KeyCode::Char('v'), KeyModifiers::NONE) => app.open_comments(),
+                (KeyCode::Char(':'), KeyModifiers::NONE) => app.start_command(),
                 _ => {
                     app.pending_g = false;
                     app.diff_jump_direction = None;

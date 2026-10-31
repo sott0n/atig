@@ -16,6 +16,7 @@ The first development slice provides a streaming Git history view:
 - [f/]f jump between changed files; [c/]c jump between diff hunks.
 - a adds a review comment to the selected diff line.
 - v opens the comment list; j/k select, e edits, and d deletes comments.
+- :session <codex|claude|other> <id> selects a validated agent session target.
 
 ## Development
 
