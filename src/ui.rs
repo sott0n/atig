@@ -27,6 +27,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
         draw_comments(frame, app, &areas);
         return;
     }
+    if app.view == View::Sessions {
+        draw_sessions(frame, app, &areas);
+        return;
+    }
 
     let viewport_height = areas[0].height as usize;
     let start = viewport_start(app, viewport_height);
@@ -121,6 +125,7 @@ fn draw_help(frame: &mut Frame, areas: &[ratatui::layout::Rect]) {
         "r                 reload",
         "a                 add review comment",
         "v                 view review comments",
+        "s                 select an agent session",
         "S                 send review comments",
         ":                 command",
         "?                 toggle this help",
@@ -131,6 +136,66 @@ fn draw_help(frame: &mut Frame, areas: &[ratatui::layout::Rect]) {
     frame.render_widget(Paragraph::new(Text::from(lines)), areas[0]);
     frame.render_widget(
         Paragraph::new("Help - q, Esc, or ? to return").style(
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        ),
+        areas[1],
+    );
+}
+
+fn draw_sessions(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
+    let height = areas[0].height as usize;
+    let start = app
+        .session_selected
+        .saturating_sub((height / 4).max(1))
+        .min(app.sessions.len().saturating_sub(height));
+    let lines = app
+        .sessions
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(height)
+        .map(|(index, session)| {
+            let text = format!(
+                "{} [{}] {}",
+                session.target.label(),
+                session.status,
+                session.title
+            );
+            if index == app.session_selected {
+                let mut line = Line::styled(
+                    text,
+                    Style::default()
+                        .fg(Color::White)
+                        .bg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                );
+                line.push_span(Span::raw(
+                    " ".repeat((areas[0].width as usize).saturating_sub(line.width())),
+                ));
+                line
+            } else {
+                Line::raw(text)
+            }
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(Text::from(lines)), areas[0]);
+
+    let left = app
+        .sessions
+        .get(app.session_selected)
+        .map(|session| session.cwd.as_str())
+        .unwrap_or(if app.sessions_loading {
+            "Discovering sessions..."
+        } else {
+            "No sessions found for this repository"
+        });
+    let right = "j/k move  Enter select  r reload  q back";
+    let gap = (areas[1].width as usize).saturating_sub(left.chars().count() + right.len());
+    frame.render_widget(
+        Paragraph::new(format!("{left}{}{right}", " ".repeat(gap))).style(
             Style::default()
                 .fg(Color::White)
                 .bg(Color::Blue)

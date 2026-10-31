@@ -1,6 +1,6 @@
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
-use crate::agent::{self, AgentTarget, DispatchEvent};
+use crate::agent::{self, AgentSession, AgentTarget, DispatchEvent, SessionListEvent};
 use crate::git::{self, DiffEvent, HistoryEvent, HistoryLine};
 
 const MAX_EVENTS_PER_TICK: usize = 256;
@@ -20,6 +20,7 @@ pub enum View {
     Diff,
     Comments,
     Help,
+    Sessions,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,10 +67,15 @@ pub struct App {
     pub dispatching: bool,
     pub search_input: String,
     pub search_query: String,
+    pub sessions: Vec<AgentSession>,
+    pub session_selected: usize,
+    pub sessions_loading: bool,
     comment_anchor: Option<CommentAnchor>,
     comment_edit_index: Option<usize>,
     dispatch_rx: Option<Receiver<DispatchEvent>>,
+    session_rx: Option<Receiver<SessionListEvent>>,
     help_return: View,
+    sessions_return: View,
     history_rx: Option<Receiver<HistoryEvent>>,
     history_cancel: Option<git::Cancellation>,
     diff_rx: Option<Receiver<DiffEvent>>,
@@ -102,10 +108,15 @@ impl App {
             dispatching: false,
             search_input: String::new(),
             search_query: String::new(),
+            sessions: Vec::new(),
+            session_selected: 0,
+            sessions_loading: false,
             comment_anchor: None,
             comment_edit_index: None,
             dispatch_rx: None,
+            session_rx: None,
             help_return: View::History,
+            sessions_return: View::History,
             history_rx: None,
             history_cancel: None,
             diff_rx: None,
@@ -175,6 +186,67 @@ impl App {
         self.view = self.help_return;
     }
 
+    pub fn open_sessions(&mut self) {
+        if self.view != View::Sessions {
+            self.sessions_return = self.view;
+        }
+        self.view = View::Sessions;
+        self.sessions.clear();
+        self.session_selected = 0;
+        self.sessions_loading = true;
+        let (tx, rx) = mpsc::channel();
+        agent::discover_sessions(tx);
+        self.session_rx = Some(rx);
+        self.message = "Discovering agent sessions...".into();
+    }
+
+    pub fn close_sessions(&mut self) {
+        self.view = self.sessions_return;
+        self.session_rx = None;
+        self.sessions_loading = false;
+    }
+
+    pub fn move_session_selection(&mut self, amount: isize) {
+        if amount < 0 {
+            self.session_selected = self.session_selected.saturating_sub(amount.unsigned_abs());
+        } else {
+            self.session_selected = self
+                .session_selected
+                .saturating_add(amount as usize)
+                .min(self.sessions.len().saturating_sub(1));
+        }
+    }
+
+    pub fn select_agent_session(&mut self) {
+        let Some(session) = self.sessions.get(self.session_selected) else {
+            self.message = "No agent sessions found for this repository".into();
+            return;
+        };
+        self.agent_target = Some(session.target.clone());
+        self.message = format!("Agent session: {}", session.target.label());
+        self.close_sessions();
+    }
+
+    pub fn drain_session_events(&mut self) -> bool {
+        let event = match self.session_rx.as_ref().map(Receiver::try_recv) {
+            Some(Ok(event)) => event,
+            Some(Err(TryRecvError::Empty)) | None => return false,
+            Some(Err(TryRecvError::Disconnected)) => {
+                SessionListEvent::Error("Session discovery ended unexpectedly".into())
+            }
+        };
+        self.session_rx = None;
+        self.sessions_loading = false;
+        match event {
+            SessionListEvent::Done(sessions) => {
+                self.sessions = sessions;
+                self.message = format!("{} agent sessions", self.sessions.len());
+            }
+            SessionListEvent::Error(error) => self.message = error,
+        }
+        true
+    }
+
     pub fn start_search(&mut self) {
         self.search_input.clear();
         self.input_mode = InputMode::Search;
@@ -231,7 +303,7 @@ impl App {
             View::Diff => find_wrapped(self.diff.len(), self.diff_scroll, direction, |index| {
                 self.diff[index].to_lowercase().contains(&query)
             }),
-            View::Comments | View::Help => None,
+            View::Comments | View::Help | View::Sessions => None,
         };
         match (self.view, destination) {
             (View::History, Some(index)) => self.selected = Some(index),
@@ -675,6 +747,7 @@ impl App {
                 }
                 _ => self.message = "Usage: :session <codex|claude|other> <id>".into(),
             },
+            Some("sessions") => self.open_sessions(),
             Some("goto") => match (parts.next(), parts.next()) {
                 (Some(line), None) if self.view == View::Diff => match line.parse::<usize>() {
                     Ok(line) if line > 0 => self.go_to_diff_line(line),
@@ -889,6 +962,28 @@ mod tests {
 
         app.submit_command();
 
+        assert_eq!(
+            app.agent_target.as_ref().map(AgentTarget::label),
+            Some("codex:019a-session".into())
+        );
+    }
+
+    #[test]
+    fn session_picker_sets_target_and_returns_to_previous_view() {
+        let mut app = App::new();
+        app.view = View::Sessions;
+        app.sessions_return = View::Diff;
+        app.sessions = vec![AgentSession {
+            target: AgentTarget::parse("codex", "019a-session").unwrap(),
+            title: "Review session".into(),
+            cwd: "/work/project".into(),
+            status: "idle".into(),
+            updated_at: 42,
+        }];
+
+        app.select_agent_session();
+
+        assert_eq!(app.view, View::Diff);
         assert_eq!(
             app.agent_target.as_ref().map(AgentTarget::label),
             Some("codex:019a-session".into())

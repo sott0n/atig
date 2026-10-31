@@ -17,6 +17,7 @@ Claude session.
 - Vim-style movement, search, and command input.
 - Colorized commit diffs with direct file, hunk, page, and line-number jumps.
 - Diff-line review comments with a list for editing and deletion.
+- Repository-scoped Codex and Claude session discovery with an in-TUI picker.
 - Explicitly confirmed, batched delivery to an existing Codex or Claude
   session.
 - In-app key reference with `?`.
@@ -56,7 +57,7 @@ atig
 2. Press `Enter` to open the selected commit.
 3. Navigate the diff or press `a` on a changed line to add a review comment.
 4. Press `v` to inspect, edit, or delete accumulated comments.
-5. Select an agent session with `:session <provider> <session-id>`.
+5. Press `s`, select a repository session with `j`/`k`, and press `Enter`.
 6. Press `S`, verify the destination, and press `y` to deliver the review.
 
 Press `?` at any time in a normal view to see the key reference.
@@ -75,6 +76,7 @@ Press `?` at any time in a normal view to see the key reference.
 | `/` | Search commit metadata and subjects |
 | `n`, `N` | Repeat the search forward or backward |
 | `r` | Reload history |
+| `s` | Open the repository agent-session picker |
 | `:` | Open command input |
 | `?` | Open the key reference |
 | `q` | Quit `atig` |
@@ -100,6 +102,7 @@ Press `?` at any time in a normal view to see the key reference.
 | `a` | Add a comment to the selected diff line |
 | `v` | Open the review comment list |
 | `S` | Confirm and send all review comments |
+| `s` | Open the repository agent-session picker |
 | `r` | Reload the current commit diff |
 | `:` | Open command input |
 | `Esc`, `q` | Return to history |
@@ -113,6 +116,7 @@ Press `?` at any time in a normal view to see the key reference.
 | `e` | Edit the selected comment |
 | `d` | Delete the selected comment |
 | `S` | Confirm and send all comments |
+| `s` | Open the repository agent-session picker |
 | `Esc`, `q` | Return to the diff |
 
 Comments are anchored to the selected commit, file, and diff line. They are
@@ -132,6 +136,7 @@ discards unsent comments.
 | `:session claude <id>` | Select an existing Claude session |
 | `:session other <id>` | Select an extension target; delivery requires a custom adapter |
 | `:session clear` | Clear the selected agent session |
+| `:sessions` | Discover and select sessions associated with this repository |
 | `:help` | Open the key reference |
 | `:q`, `:quit` | Quit `atig` |
 
@@ -147,6 +152,11 @@ Git revision arguments are passed directly to `git log`. For example:
 
 `atig` currently includes adapters for Codex CLI and Claude Code:
 
+- Pressing `s` discovers sessions associated with the current Git repository.
+- Codex sessions are read through the official app-server `thread/list`
+  protocol and matched using Git origin or working directory.
+- Claude sessions are matched by reading only session ID, working directory,
+  and file modification time from the local Claude project history.
 - Codex delivery resumes the target through `codex exec resume`.
 - Claude delivery resumes the target through non-interactive
   `claude --resume` with unattended permission prompts denied.

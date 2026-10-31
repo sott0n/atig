@@ -32,6 +32,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
         needs_draw |= app.drain_history_events();
         needs_draw |= app.drain_diff_events();
         needs_draw |= app.drain_dispatch_events();
+        needs_draw |= app.drain_session_events();
         if needs_draw {
             terminal.draw(|frame| ui::draw(frame, &app))?;
             needs_draw = false;
@@ -79,6 +80,23 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
             continue;
         }
 
+        if app.view == View::Sessions {
+            match (key.code, key.modifiers) {
+                (KeyCode::Esc | KeyCode::Char('q'), KeyModifiers::NONE) => app.close_sessions(),
+                (KeyCode::Char('j') | KeyCode::Down, KeyModifiers::NONE) => {
+                    app.move_session_selection(1)
+                }
+                (KeyCode::Char('k') | KeyCode::Up, KeyModifiers::NONE) => {
+                    app.move_session_selection(-1)
+                }
+                (KeyCode::Enter, KeyModifiers::NONE) => app.select_agent_session(),
+                (KeyCode::Char('r'), KeyModifiers::NONE) => app.open_sessions(),
+                (KeyCode::Char('?'), _) => app.open_help(),
+                _ => {}
+            }
+            continue;
+        }
+
         if app.view == View::Comments {
             if app.input_mode == InputMode::Comment {
                 match key.code {
@@ -100,6 +118,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                     (KeyCode::Char('e'), KeyModifiers::NONE) => app.edit_selected_comment(),
                     (KeyCode::Char('d'), KeyModifiers::NONE) => app.delete_selected_comment(),
                     (KeyCode::Char('S'), KeyModifiers::SHIFT) => app.request_send_review(),
+                    (KeyCode::Char('s'), KeyModifiers::NONE) => app.open_sessions(),
                     (KeyCode::Char('?'), _) => app.open_help(),
                     _ => {}
                 }
@@ -168,6 +187,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 (KeyCode::Char('v'), KeyModifiers::NONE) => app.open_comments(),
                 (KeyCode::Char(':'), KeyModifiers::NONE) => app.start_command(),
                 (KeyCode::Char('S'), KeyModifiers::SHIFT) => app.request_send_review(),
+                (KeyCode::Char('s'), KeyModifiers::NONE) => app.open_sessions(),
                 (KeyCode::Char('/'), KeyModifiers::NONE) => app.start_search(),
                 (KeyCode::Char('n'), KeyModifiers::NONE) => app.repeat_search(1),
                 (KeyCode::Char('N'), KeyModifiers::SHIFT) => app.repeat_search(-1),
@@ -196,6 +216,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 (KeyCode::Char('n'), KeyModifiers::NONE) => app.repeat_search(1),
                 (KeyCode::Char('N'), KeyModifiers::SHIFT) => app.repeat_search(-1),
                 (KeyCode::Char('r'), KeyModifiers::NONE) => app.reload(),
+                (KeyCode::Char('s'), KeyModifiers::NONE) => app.open_sessions(),
                 (KeyCode::Char('?'), _) => app.open_help(),
                 _ => app.pending_g = false,
             },
