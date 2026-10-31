@@ -6,6 +6,7 @@ use crate::git::{self, DiffEvent, HistoryEvent, HistoryLine};
 pub enum InputMode {
     Normal,
     Command,
+    Comment,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,6 +19,21 @@ pub enum View {
 pub enum DiffTarget {
     File,
     Change,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewComment {
+    pub commit: String,
+    pub file: String,
+    pub line: usize,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CommentAnchor {
+    commit: String,
+    file: String,
+    line: usize,
 }
 
 pub struct App {
@@ -36,6 +52,9 @@ pub struct App {
     pub diff_loading: bool,
     pub diff_scroll: usize,
     pub diff_jump_direction: Option<isize>,
+    pub comments: Vec<ReviewComment>,
+    pub comment_buffer: String,
+    comment_anchor: Option<CommentAnchor>,
     history_rx: Option<Receiver<HistoryEvent>>,
     diff_rx: Option<Receiver<DiffEvent>>,
     pending_graph: Option<String>,
@@ -59,6 +78,9 @@ impl App {
             diff_loading: false,
             diff_scroll: 0,
             diff_jump_direction: None,
+            comments: Vec::new(),
+            comment_buffer: String::new(),
+            comment_anchor: None,
             history_rx: None,
             diff_rx: None,
             pending_graph: None,
@@ -159,6 +181,55 @@ impl App {
             };
             self.message = format!("No {direction} {target}");
         }
+    }
+
+    pub fn start_comment(&mut self) {
+        let Some((file, line)) = diff_location(&self.diff, self.diff_scroll) else {
+            self.message = "Select an added, removed, or context line".into();
+            return;
+        };
+        let Some(commit) = self.diff_oid.clone() else {
+            return;
+        };
+        self.comment_anchor = Some(CommentAnchor { commit, file, line });
+        self.comment_buffer.clear();
+        self.input_mode = InputMode::Comment;
+    }
+
+    pub fn comment_push(&mut self, character: char) {
+        self.comment_buffer.push(character);
+    }
+
+    pub fn comment_backspace(&mut self) {
+        self.comment_buffer.pop();
+    }
+
+    pub fn cancel_comment(&mut self) {
+        self.comment_buffer.clear();
+        self.comment_anchor = None;
+        self.input_mode = InputMode::Normal;
+    }
+
+    pub fn submit_comment(&mut self) {
+        let body = self.comment_buffer.trim().to_string();
+        if body.is_empty() {
+            self.message = "Comment was empty".into();
+            self.cancel_comment();
+            return;
+        }
+        let Some(anchor) = self.comment_anchor.take() else {
+            self.cancel_comment();
+            return;
+        };
+        self.comments.push(ReviewComment {
+            commit: anchor.commit,
+            file: anchor.file,
+            line: anchor.line,
+            body,
+        });
+        self.comment_buffer.clear();
+        self.input_mode = InputMode::Normal;
+        self.message = format!("{} review comments", self.comments.len());
     }
 
     pub fn drain_diff_events(&mut self) -> bool {
@@ -379,6 +450,61 @@ impl App {
     }
 }
 
+fn diff_location(diff: &[String], cursor: usize) -> Option<(String, usize)> {
+    let mut file = None;
+    let mut old_line = 0usize;
+    let mut new_line = 0usize;
+    let mut in_hunk = false;
+
+    for (index, text) in diff.iter().enumerate().take(cursor.saturating_add(1)) {
+        if let Some(path) = text.strip_prefix("+++ b/") {
+            file = Some(path.to_string());
+            continue;
+        }
+        if let Some((old, new)) = parse_hunk_start(text) {
+            old_line = old;
+            new_line = new;
+            in_hunk = true;
+            continue;
+        }
+        if !in_hunk || text.starts_with("\\ No newline") {
+            continue;
+        }
+
+        let location = if text.starts_with('+') {
+            let line = new_line;
+            new_line += 1;
+            line
+        } else if text.starts_with('-') {
+            let line = old_line;
+            old_line += 1;
+            line
+        } else if text.starts_with(' ') {
+            let line = new_line;
+            old_line += 1;
+            new_line += 1;
+            line
+        } else {
+            continue;
+        };
+
+        if index == cursor {
+            return Some((file.clone()?, location));
+        }
+    }
+    None
+}
+
+fn parse_hunk_start(line: &str) -> Option<(usize, usize)> {
+    let header = line.strip_prefix("@@ -")?;
+    let (old, rest) = header.split_once(" +")?;
+    let new = rest.split_whitespace().next()?;
+    Some((
+        old.split(',').next()?.parse().ok()?,
+        new.split(',').next()?.parse().ok()?,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -461,5 +587,35 @@ mod tests {
         app.begin_diff_jump(-1);
         app.complete_diff_jump(DiffTarget::File);
         assert_eq!(app.diff_scroll, 1);
+    }
+
+    #[test]
+    fn comment_records_commit_file_and_new_line() {
+        let mut app = App::new();
+        app.diff_oid = Some("abc123".into());
+        app.diff = vec![
+            "diff --git a/src/main.rs b/src/main.rs".into(),
+            "--- a/src/main.rs".into(),
+            "+++ b/src/main.rs".into(),
+            "@@ -10,2 +10,3 @@".into(),
+            " context".into(),
+            "+added".into(),
+        ];
+        app.diff_scroll = 5;
+
+        app.start_comment();
+        app.comment_buffer = "Please simplify".into();
+        app.submit_comment();
+
+        assert_eq!(
+            app.comments,
+            [ReviewComment {
+                commit: "abc123".into(),
+                file: "src/main.rs".into(),
+                line: 11,
+                body: "Please simplify".into(),
+            }]
+        );
+        assert_eq!(app.input_mode, InputMode::Normal);
     }
 }

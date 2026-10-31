@@ -14,6 +14,7 @@ The first development slice provides a streaming Git history view:
 - The same j/k, gg/G, and Ctrl-d/Ctrl-u navigation works in commit diffs.
 - Diff headers, hunks, additions, and deletions use tig-style colors.
 - [f/]f jump between changed files; [c/]c jump between diff hunks.
+- a adds a review comment to the selected diff line.
 
 ## Development
 

@@ -48,6 +48,16 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
         needs_draw = true;
 
         if app.view == View::Diff {
+            if app.input_mode == InputMode::Comment {
+                match key.code {
+                    KeyCode::Esc => app.cancel_comment(),
+                    KeyCode::Enter => app.submit_comment(),
+                    KeyCode::Backspace => app.comment_backspace(),
+                    KeyCode::Char(character) => app.comment_push(character),
+                    _ => {}
+                }
+                continue;
+            }
             match (key.code, key.modifiers) {
                 (KeyCode::Esc | KeyCode::Char('q'), KeyModifiers::NONE) => app.close_diff(),
                 (KeyCode::Char('j') | KeyCode::Down, KeyModifiers::NONE) => app.move_diff(1),
@@ -64,6 +74,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 (KeyCode::Char('c'), KeyModifiers::NONE) => {
                     app.complete_diff_jump(DiffTarget::Change)
                 }
+                (KeyCode::Char('a'), KeyModifiers::NONE) => app.start_comment(),
                 _ => {
                     app.pending_g = false;
                     app.diff_jump_direction = None;
@@ -92,6 +103,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 KeyCode::Char(character) => app.command_push(character),
                 _ => {}
             },
+            InputMode::Comment => unreachable!("comments are only entered in the diff view"),
         }
     }
 

@@ -88,6 +88,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
                 .min(areas[1].right().saturating_sub(1));
             frame.set_cursor_position((cursor_x, areas[1].y));
         }
+        InputMode::Comment => unreachable!("comments are drawn in the diff view"),
     }
 }
 
@@ -104,13 +105,29 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
         .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(Text::from(lines)), areas[0]);
 
+    if app.input_mode == InputMode::Comment {
+        let prompt = format!("Comment: {}", app.comment_buffer);
+        frame.render_widget(Paragraph::new(prompt), areas[1]);
+        let cursor_x = areas[1]
+            .x
+            .saturating_add("Comment: ".len() as u16)
+            .saturating_add(app.comment_buffer.chars().count() as u16)
+            .min(areas[1].right().saturating_sub(1));
+        frame.set_cursor_position((cursor_x, areas[1].y));
+        return;
+    }
+
     let oid = app.diff_oid.as_deref().unwrap_or("-");
     let position = if app.diff.is_empty() {
         0
     } else {
         app.diff_scroll + 1
     };
-    let left = format!("commit {oid} - line {position} of {}", app.diff.len());
+    let left = format!(
+        "commit {oid} - line {position} of {} - {} comments",
+        app.diff.len(),
+        app.comments.len()
+    );
     let right = if app.diff_loading {
         "loading".to_string()
     } else if app.diff.is_empty() {
