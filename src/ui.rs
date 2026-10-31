@@ -374,7 +374,9 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
     }
     if app.input_mode == InputMode::Comment {
         let status = format!(
-            "Add review comment - Enter save  Esc cancel{}",
+            "Reviewing line {} of {}{}",
+            app.diff_scroll + 1,
+            app.diff.len(),
             agent_target_suffix(app)
         );
         frame.render_widget(
@@ -392,9 +394,13 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
             .min(areas[0].bottom().saturating_sub(1));
         let cursor_x = areas[0]
             .x
-            .saturating_add(2)
-            .saturating_add(app.comment_buffer.chars().count() as u16)
-            .min(areas[0].right().saturating_sub(2));
+            .saturating_add(4)
+            .saturating_add(
+                visible_comment_input(&app.comment_buffer, areas[0].width as usize)
+                    .chars()
+                    .count() as u16,
+            )
+            .min(areas[0].right().saturating_sub(1));
         frame.set_cursor_position((cursor_x, input_y));
         return;
     }
@@ -447,25 +453,27 @@ fn rendered_diff_row_height(app: &App, diff_index: usize, width: usize) -> usize
 }
 
 fn saved_comment_box(comment: &ReviewComment, number: usize, width: usize) -> Vec<Line<'static>> {
-    let border = Style::default()
-        .fg(Color::Yellow)
-        .add_modifier(Modifier::BOLD);
-    let body_style = Style::default().fg(Color::White).bg(Color::DarkGray);
-    let mut lines = vec![Line::styled(
-        boxed_label("╭─ ", &format!("Review comment #{number} "), "╮", width),
-        border,
-    )];
+    let accent = Style::default().fg(Color::Yellow);
+    let mut lines = vec![Line::from(vec![
+        Span::styled("  ▎ ", accent),
+        Span::styled(
+            format!("Review #{number}"),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" · {}:{}", comment.file, comment.line),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ])];
     let content_width = width.saturating_sub(4).max(1);
     for chunk in wrap_comment_body(&comment.body, content_width) {
-        let mut line = Line::styled(format!("│ {chunk}"), body_style);
-        line.push_span(Span::styled(
-            " ".repeat(width.saturating_sub(line.width() + 1)),
-            body_style,
-        ));
-        line.push_span(Span::styled("│", body_style.fg(Color::Yellow)));
-        lines.push(line);
+        lines.push(Line::from(vec![
+            Span::styled("  ▎ ", accent),
+            Span::styled(chunk, Style::default().fg(Color::White)),
+        ]));
     }
-    lines.push(Line::styled(boxed_label("╰", "", "╯", width), border));
     lines
 }
 
@@ -481,33 +489,38 @@ fn wrap_comment_body(body: &str, width: usize) -> Vec<String> {
 }
 
 fn inline_comment_box(buffer: &str, width: usize) -> Vec<Line<'static>> {
-    let border = Style::default()
-        .fg(Color::Cyan)
-        .add_modifier(Modifier::BOLD);
-    let input = Style::default().fg(Color::White).bg(Color::DarkGray);
-    let header = boxed_label("╭─ ", "Add review comment ", "╮", width);
-    let footer = boxed_label("╰─ ", "Enter save · Esc cancel ", "╯", width);
-
-    let mut input_line = Line::styled(format!("│ {buffer}"), input);
-    input_line.push_span(Span::styled(
-        " ".repeat(width.saturating_sub(input_line.width() + 1)),
-        input,
-    ));
-    input_line.push_span(Span::styled("│", input.fg(Color::Cyan)));
+    let accent = Style::default().fg(Color::Cyan);
+    let input = visible_comment_input(buffer, width);
 
     vec![
-        Line::styled(header, border),
-        input_line,
-        Line::styled(footer, border),
+        Line::from(vec![
+            Span::styled("  ▎ ", accent),
+            Span::styled(
+                "Add review comment",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  ▎ ", accent),
+            Span::styled(input, Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("  ▎ ", accent),
+            Span::styled(
+                "Enter save · Esc cancel",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
     ]
 }
 
-fn boxed_label(prefix: &str, label: &str, end: &str, width: usize) -> String {
-    let used = prefix.chars().count() + label.chars().count() + end.chars().count();
-    format!(
-        "{prefix}{label}{}{end}",
-        "─".repeat(width.saturating_sub(used))
-    )
+fn visible_comment_input(buffer: &str, width: usize) -> String {
+    let available = width.saturating_sub(4).max(1);
+    let mut visible = buffer.chars().rev().take(available).collect::<Vec<_>>();
+    visible.reverse();
+    visible.into_iter().collect()
 }
 
 fn agent_target_suffix(app: &App) -> String {
@@ -755,18 +768,22 @@ mod tests {
     }
 
     #[test]
-    fn inline_comment_box_uses_three_full_width_lines() {
+    fn inline_comment_editor_uses_compact_accent_lines() {
         let rendered = inline_comment_box("Please simplify this", 60);
 
         assert_eq!(rendered.len(), 3);
-        assert!(rendered.iter().all(|line| line.width() == 60));
+        assert!(
+            rendered
+                .iter()
+                .all(|line| line.to_string().starts_with("  ▎ "))
+        );
         assert!(rendered[0].to_string().contains("Add review comment"));
         assert!(rendered[1].to_string().contains("Please simplify this"));
         assert!(rendered[2].to_string().contains("Enter save · Esc cancel"));
     }
 
     #[test]
-    fn saved_comment_box_wraps_and_fills_the_viewport() {
+    fn saved_comment_card_wraps_with_location_header() {
         let comment = ReviewComment {
             commit: "abc123".into(),
             file: "src/main.rs".into(),
@@ -777,8 +794,21 @@ mod tests {
 
         let rendered = saved_comment_box(&comment, 1, 24);
 
-        assert!(rendered.len() > 3);
-        assert!(rendered.iter().all(|line| line.width() == 24));
-        assert!(rendered[0].to_string().contains("Review comment #1"));
+        assert_eq!(rendered.len(), 3);
+        assert!(
+            rendered
+                .iter()
+                .all(|line| line.to_string().starts_with("  ▎ "))
+        );
+        assert!(
+            rendered[0]
+                .to_string()
+                .contains("Review #1 · src/main.rs:12")
+        );
+    }
+
+    #[test]
+    fn comment_input_keeps_the_visible_tail() {
+        assert_eq!(visible_comment_input("abcdefghijk", 10), "fghijk");
     }
 }
