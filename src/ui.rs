@@ -93,20 +93,23 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
 fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
     let height = areas[0].height as usize;
-    let start = app
-        .diff_scroll
-        .min(app.diff.len().saturating_sub(height.max(1)));
+    let start = diff_viewport_start(app, height);
     let lines = app
         .diff
         .iter()
+        .enumerate()
         .skip(start)
         .take(height)
-        .map(|line| Line::raw(line.clone()))
+        .map(|(index, line)| diff_line(line, app.diff_scroll == index, areas[0].width as usize))
         .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(Text::from(lines)), areas[0]);
 
     let oid = app.diff_oid.as_deref().unwrap_or("-");
-    let position = if app.diff.is_empty() { 0 } else { start + 1 };
+    let position = if app.diff.is_empty() {
+        0
+    } else {
+        app.diff_scroll + 1
+    };
     let left = format!("commit {oid} - line {position} of {}", app.diff.len());
     let right = if app.diff_loading {
         "loading".to_string()
@@ -125,6 +128,61 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
         ),
         areas[1],
     );
+}
+
+fn diff_viewport_start(app: &App, height: usize) -> usize {
+    if height == 0 || app.diff.len() <= height {
+        return 0;
+    }
+    let padding = (height / 4).max(1);
+    app.diff_scroll
+        .saturating_sub(padding)
+        .min(app.diff.len().saturating_sub(height))
+}
+
+fn diff_line(line: &str, selected: bool, viewport_width: usize) -> Line<'static> {
+    if selected {
+        let mut rendered = Line::styled(
+            line.to_string(),
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        );
+        rendered.push_span(Span::raw(
+            " ".repeat(viewport_width.saturating_sub(rendered.width())),
+        ));
+        return rendered;
+    }
+
+    let style = if line.starts_with("diff --git ") {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else if line.starts_with("@@") {
+        Style::default().fg(Color::Cyan)
+    } else if line.starts_with("+++") {
+        Style::default().fg(Color::Green)
+    } else if line.starts_with("---") {
+        Style::default().fg(Color::Red)
+    } else if line.starts_with('+') {
+        Style::default().fg(Color::Green)
+    } else if line.starts_with('-') {
+        Style::default().fg(Color::Red)
+    } else if line.starts_with("index ")
+        || line.starts_with("new file mode ")
+        || line.starts_with("deleted file mode ")
+        || line.starts_with("similarity index ")
+    {
+        Style::default().fg(Color::Blue)
+    } else if line.starts_with("commit ") {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    Line::styled(line.to_string(), style)
 }
 
 fn history_line(
@@ -289,5 +347,23 @@ mod tests {
         assert_eq!(rendered.style.bg, Some(Color::Green));
         assert!(rendered.style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(rendered.width(), 100);
+    }
+
+    #[test]
+    fn diff_lines_use_semantic_colors() {
+        assert_eq!(diff_line("+added", false, 80).style.fg, Some(Color::Green));
+        assert_eq!(diff_line("-removed", false, 80).style.fg, Some(Color::Red));
+        assert_eq!(
+            diff_line("@@ -1 +1 @@", false, 80).style.fg,
+            Some(Color::Cyan)
+        );
+    }
+
+    #[test]
+    fn selected_diff_line_fills_the_viewport() {
+        let rendered = diff_line("+added", true, 80);
+
+        assert_eq!(rendered.style.bg, Some(Color::Green));
+        assert_eq!(rendered.width(), 80);
     }
 }

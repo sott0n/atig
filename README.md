@@ -12,6 +12,7 @@ The first development slice provides a streaming Git history view:
 - :reload, :help, and :q provide the initial command interface.
 - Enter opens the selected commit; Esc or q returns to history.
 - The same j/k, gg/G, and Ctrl-d/Ctrl-u navigation works in commit diffs.
+- Diff headers, hunks, additions, and deletions use tig-style colors.
 
 ## Development
 
