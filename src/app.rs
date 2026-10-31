@@ -30,12 +30,19 @@ pub enum DiffTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentReply {
+    pub agent: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewComment {
     pub commit: String,
     pub file: String,
     pub line: usize,
     pub diff_index: usize,
     pub body: String,
+    pub reply: Option<AgentReply>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +84,7 @@ pub struct App {
     comment_edit_index: Option<usize>,
     pending_send_comment_index: Option<usize>,
     dispatched_comments: Vec<ReviewComment>,
+    dispatched_agent: Option<String>,
     dispatch_rx: Option<Receiver<DispatchEvent>>,
     session_rx: Option<Receiver<SessionListEvent>>,
     help_return: View,
@@ -121,6 +129,7 @@ impl App {
             comment_edit_index: None,
             pending_send_comment_index: None,
             dispatched_comments: Vec::new(),
+            dispatched_agent: None,
             dispatch_rx: None,
             session_rx: None,
             help_return: View::History,
@@ -512,6 +521,7 @@ impl App {
         if let Some(index) = self.comment_edit_index.take() {
             if let Some(comment) = self.comments.get_mut(index) {
                 comment.body = body;
+                comment.reply = None;
             }
             self.comment_buffer.clear();
             self.input_mode = InputMode::Normal;
@@ -529,6 +539,7 @@ impl App {
             line: anchor.line,
             diff_index: anchor.diff_index,
             body,
+            reply: None,
         });
         self.diff_comment_selected = Some(comment_index);
         self.comment_buffer.clear();
@@ -644,6 +655,7 @@ impl App {
             .unwrap_or_else(|| self.comments.clone());
         let prompt = format_review_request(&comments);
         let (tx, rx) = mpsc::channel();
+        self.dispatched_agent = Some(target.short_label());
         agent::dispatch(target, prompt, tx);
         self.dispatched_comments = comments;
         self.pending_send_comment_index = None;
@@ -664,22 +676,31 @@ impl App {
         self.dispatch_rx = None;
         self.dispatching = false;
         match event {
-            DispatchEvent::Done => {
+            DispatchEvent::Done(response) => {
                 let delivered = std::mem::take(&mut self.dispatched_comments);
-                let delivered_count = delivered.len();
+                let agent = self
+                    .dispatched_agent
+                    .take()
+                    .unwrap_or_else(|| "agent".into());
+                let mut attached = 0;
                 for comment in delivered {
-                    if let Some(index) = self.comments.iter().position(|item| item == &comment) {
-                        self.remove_comment_at(index);
+                    if let Some(item) = self.comments.iter_mut().find(|item| **item == comment) {
+                        item.reply = Some(AgentReply {
+                            agent: agent.clone(),
+                            body: response.clone(),
+                        });
+                        attached += 1;
                     }
                 }
-                self.message = if delivered_count == 1 {
-                    "Review comment delivered".into()
+                self.message = if attached == 1 {
+                    "Agent response received".into()
                 } else {
-                    format!("{delivered_count} review comments delivered")
+                    format!("Agent response attached to {attached} comments")
                 };
             }
             DispatchEvent::Error(error) => {
                 self.dispatched_comments.clear();
+                self.dispatched_agent = None;
                 self.message = error;
             }
         }
@@ -1152,6 +1173,7 @@ mod tests {
             line: 1,
             diff_index: 0,
             body: "Please simplify".into(),
+            reply: None,
         }];
 
         app.move_diff_cursor(1);
@@ -1244,6 +1266,7 @@ mod tests {
                 line: 11,
                 diff_index: 5,
                 body: "Please simplify".into(),
+                reply: None,
             }]
         );
         assert_eq!(app.input_mode, InputMode::Normal);
@@ -1258,6 +1281,7 @@ mod tests {
             line: 11,
             diff_index: 5,
             body: "Old body".into(),
+            reply: None,
         });
 
         app.edit_selected_comment();
@@ -1283,6 +1307,7 @@ mod tests {
             line: 4,
             diff_index: 3,
             body: "Handle this error".into(),
+            reply: None,
         });
         app.request_send_review();
         assert_eq!(app.input_mode, InputMode::ConfirmSend);
@@ -1304,6 +1329,7 @@ mod tests {
                 line: 4,
                 diff_index: 3,
                 body: "First comment".into(),
+                reply: None,
             },
             ReviewComment {
                 commit: "abc123".into(),
@@ -1311,6 +1337,7 @@ mod tests {
                 line: 8,
                 diff_index: 7,
                 body: "Second comment".into(),
+                reply: None,
             },
         ];
         app.diff_comment_selected = Some(1);
@@ -1325,7 +1352,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_single_send_removes_only_the_delivered_snapshot() {
+    fn completed_single_send_attaches_response_to_the_sent_snapshot() {
         let mut app = App::new();
         let delivered = ReviewComment {
             commit: "abc123".into(),
@@ -1333,6 +1360,7 @@ mod tests {
             line: 4,
             diff_index: 3,
             body: "Delivered".into(),
+            reply: None,
         };
         let remaining = ReviewComment {
             body: "Still pending".into(),
@@ -1342,13 +1370,23 @@ mod tests {
         app.dispatched_comments = vec![delivered];
         app.dispatching = true;
         let (tx, rx) = mpsc::channel();
-        tx.send(DispatchEvent::Done).unwrap();
+        app.dispatched_agent = Some("codex:session-1".into());
+        tx.send(DispatchEvent::Done("Implemented and tested.".into()))
+            .unwrap();
         app.dispatch_rx = Some(rx);
 
         assert!(app.drain_dispatch_events());
 
-        assert_eq!(app.comments, [remaining]);
-        assert_eq!(app.message, "Review comment delivered");
+        assert_eq!(app.comments.len(), 2);
+        assert_eq!(app.comments[1], remaining);
+        assert_eq!(
+            app.comments[0].reply,
+            Some(AgentReply {
+                agent: "codex:session-1".into(),
+                body: "Implemented and tested.".into(),
+            })
+        );
+        assert_eq!(app.message, "Agent response received");
     }
 
     #[test]

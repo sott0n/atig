@@ -40,7 +40,7 @@ pub enum SessionListEvent {
 }
 
 pub enum DispatchEvent {
-    Done,
+    Done(String),
     Error(String),
 }
 
@@ -296,18 +296,18 @@ pub fn dispatch(target: AgentTarget, prompt: String, sender: Sender<DispatchEven
             }
         };
         let event = match result {
-            Ok(()) => DispatchEvent::Done,
+            Ok(response) => DispatchEvent::Done(response),
             Err(error) => DispatchEvent::Error(error),
         };
         let _ = sender.send(event);
     });
 }
 
-fn dispatch_codex(session_id: &str, prompt: &str) -> Result<(), String> {
+fn dispatch_codex(session_id: &str, prompt: &str) -> Result<String, String> {
     let mut child = Command::new("codex")
         .args(["exec", "resume", session_id, "-"])
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| format!("Failed to start Codex: {error}"))?;
@@ -320,7 +320,7 @@ fn dispatch_codex(session_id: &str, prompt: &str) -> Result<(), String> {
     finish_dispatch(child, "Codex")
 }
 
-fn dispatch_claude(session_id: &str, prompt: &str) -> Result<(), String> {
+fn dispatch_claude(session_id: &str, prompt: &str) -> Result<String, String> {
     let child = Command::new("claude")
         .args([
             "-p",
@@ -331,19 +331,19 @@ fn dispatch_claude(session_id: &str, prompt: &str) -> Result<(), String> {
             prompt,
         ])
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| format!("Failed to start Claude: {error}"))?;
     finish_dispatch(child, "Claude")
 }
 
-fn finish_dispatch(child: std::process::Child, name: &str) -> Result<(), String> {
+fn finish_dispatch(child: std::process::Child, name: &str) -> Result<String, String> {
     let output = child
         .wait_with_output()
         .map_err(|error| format!("Failed to wait for {name}: {error}"))?;
     if output.status.success() {
-        return Ok(());
+        return Ok(normalize_agent_response(&output.stdout));
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stderr = stderr.trim();
@@ -352,6 +352,46 @@ fn finish_dispatch(child: std::process::Child, name: &str) -> Result<(), String>
     } else {
         Err(format!("{name}: {stderr}"))
     }
+}
+
+fn normalize_agent_response(output: &[u8]) -> String {
+    const MAX_RESPONSE_CHARS: usize = 20_000;
+    let decoded = String::from_utf8_lossy(output);
+    let mut response = String::new();
+    let mut escape_sequence = false;
+    let mut truncated = false;
+    let mut response_chars = 0;
+
+    for character in decoded.chars() {
+        if escape_sequence {
+            if character.is_ascii_alphabetic() {
+                escape_sequence = false;
+            }
+            continue;
+        }
+        if character == '\u{1b}' {
+            escape_sequence = true;
+            continue;
+        }
+        if character.is_control() && !matches!(character, '\n' | '\t') {
+            continue;
+        }
+        if response_chars == MAX_RESPONSE_CHARS {
+            truncated = true;
+            break;
+        }
+        response.push(character);
+        response_chars += 1;
+    }
+
+    let mut response = response.trim().to_string();
+    if response.is_empty() {
+        return "Agent completed without a text response.".into();
+    }
+    if truncated {
+        response.push_str("\n… response truncated by atig");
+    }
+    response
 }
 
 impl AgentTarget {
@@ -440,5 +480,17 @@ mod tests {
     fn truncates_titles_on_character_boundaries() {
         assert_eq!(truncate("abcdef", 4), "abc…");
         assert_eq!(truncate("日本語", 4), "日本語");
+    }
+
+    #[test]
+    fn normalizes_agent_output_for_terminal_display() {
+        assert_eq!(
+            normalize_agent_response(b"\x1b[32mImplemented\x1b[0m\r\nTested\0"),
+            "Implemented\nTested"
+        );
+        assert_eq!(
+            normalize_agent_response(b"\r\n"),
+            "Agent completed without a text response."
+        );
     }
 }

@@ -131,8 +131,8 @@ the selected agent session.
 | `Esc`, `q` | Return to the diff |
 
 Comments are anchored to the selected commit, file, and diff line. They are
-kept in memory for the current `atig` process; quitting the application
-discards unsent comments.
+kept in memory for the current `atig` process together with any captured agent
+response; quitting the application discards them.
 
 ## Commands
 
@@ -174,10 +174,16 @@ Git revision arguments are passed directly to `git log`. For example:
 - `other` is reserved for future/custom adapters and does not execute a
   command today.
 
-All accumulated comments are formatted into one review request. The request
-asks the target agent to use a sub-agent when supported, make only the reviewed
-changes, run relevant tests, and avoid committing or pushing. Sub-agent
-creation is ultimately controlled by the target agent and its configuration.
+When an inline comment is selected, `S` sends that comment alone. When a code
+line is selected, `S` sends all accumulated comments as one review request.
+The request asks the target agent to use a sub-agent when supported, make only
+the reviewed changes, run relevant tests, and avoid committing or pushing.
+Sub-agent creation is ultimately controlled by the target agent and its
+configuration.
+
+After the CLI finishes, its text response is shown directly below the review
+comment as an `Agent response` block. The comment remains available for
+follow-up edits or another send.
 
 Delivery is deliberately conservative:
 
@@ -186,8 +192,8 @@ Delivery is deliberately conservative:
 - `S` always shows a destination confirmation before delivery.
 - Agent CLIs are launched without a shell and without sandbox or approval
   bypass flags.
-- Comments are cleared only after successful delivery and remain available if
-  the adapter reports an error.
+- Comments remain visible after delivery, and responses are attached only to
+  the exact comment snapshot that was sent.
 - Only one delivery can run at a time.
 
 The selected CLI must already be installed, authenticated, and able to resolve
@@ -206,8 +212,8 @@ still streamed; there is no artificial commit limit.
 - Only committed changes can be reviewed; working-tree and staged diffs do not
   yet have dedicated views.
 - Review comments are not persisted between `atig` processes.
-- Agent output is not streamed into the TUI; the status bar reports delivery
-  success or failure.
+- Agent responses appear after the CLI command finishes; token-by-token
+  streaming is not implemented.
 - The generic `other` agent adapter is not implemented.
 - The Git graph targets the common `tig` experience but is not yet guaranteed
   to reproduce every complex octopus or criss-cross graph exactly.

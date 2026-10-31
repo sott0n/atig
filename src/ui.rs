@@ -518,18 +518,50 @@ fn saved_comment_box(
             Span::styled(chunk, Style::default().fg(Color::White)),
         ]));
     }
+    if let Some(reply) = &comment.reply {
+        let reply_accent = Style::default().fg(Color::Blue);
+        lines.push(Line::from(vec![
+            Span::styled("  ┆ ", reply_accent),
+            Span::styled(
+                "Agent response",
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" · {}", reply.agent),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+        for chunk in wrap_comment_body(&reply.body, content_width) {
+            lines.push(Line::from(vec![
+                Span::styled("  ┆ ", reply_accent),
+                Span::styled(chunk, Style::default().fg(Color::White)),
+            ]));
+        }
+    }
     lines
 }
 
 fn wrap_comment_body(body: &str, width: usize) -> Vec<String> {
-    let characters = body.chars().collect::<Vec<_>>();
-    if characters.is_empty() {
-        return vec![String::new()];
+    let width = width.max(1);
+    let mut wrapped = Vec::new();
+    for logical_line in body.lines() {
+        let characters = logical_line.chars().collect::<Vec<_>>();
+        if characters.is_empty() {
+            wrapped.push(String::new());
+        } else {
+            wrapped.extend(
+                characters
+                    .chunks(width)
+                    .map(|chunk| chunk.iter().collect::<String>()),
+            );
+        }
     }
-    characters
-        .chunks(width.max(1))
-        .map(|chunk| chunk.iter().collect())
-        .collect()
+    if wrapped.is_empty() {
+        wrapped.push(String::new());
+    }
+    wrapped
 }
 
 fn inline_comment_box(buffer: &str, editing: bool, width: usize) -> Vec<Line<'static>> {
@@ -846,6 +878,7 @@ mod tests {
             line: 12,
             diff_index: 5,
             body: "This comment is long enough to wrap".into(),
+            reply: None,
         };
 
         let rendered = saved_comment_box(&comment, 1, false, 24);
@@ -867,5 +900,31 @@ mod tests {
     #[test]
     fn comment_input_keeps_the_visible_tail() {
         assert_eq!(visible_comment_input("abcdefghijk", 10), "fghijk");
+    }
+
+    #[test]
+    fn agent_reply_is_rendered_below_its_comment() {
+        let comment = ReviewComment {
+            commit: "abc123".into(),
+            file: "src/main.rs".into(),
+            line: 12,
+            diff_index: 5,
+            body: "Please simplify".into(),
+            reply: Some(crate::app::AgentReply {
+                agent: "codex:session-1".into(),
+                body: "Implemented.\nTests pass.".into(),
+            }),
+        };
+
+        let rendered = saved_comment_box(&comment, 1, false, 60);
+        let text = rendered
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("Agent response · codex:session-1"));
+        assert!(text.contains("Implemented."));
+        assert!(text.contains("Tests pass."));
     }
 }
