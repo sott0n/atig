@@ -304,11 +304,7 @@ pub fn dispatch(target: AgentTarget, prompt: String, sender: Sender<DispatchEven
 }
 
 fn dispatch_codex(session_id: &str, prompt: &str) -> Result<String, String> {
-    let mut child = Command::new("codex")
-        .args(["exec", "resume", session_id, "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+    let mut child = codex_fork_command(session_id)
         .spawn()
         .map_err(|error| format!("Failed to start Codex: {error}"))?;
     child
@@ -318,6 +314,16 @@ fn dispatch_codex(session_id: &str, prompt: &str) -> Result<String, String> {
         .write_all(prompt.as_bytes())
         .map_err(|error| format!("Failed to send review to Codex: {error}"))?;
     finish_dispatch(child, "Codex")
+}
+
+fn codex_fork_command(session_id: &str) -> Command {
+    let mut command = Command::new("codex");
+    command
+        .args(["exec", "fork", session_id, "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command
 }
 
 fn dispatch_claude(session_id: &str, prompt: &str) -> Result<String, String> {
@@ -435,6 +441,14 @@ impl AgentTarget {
         format!("{}:{visible}{suffix}", self.provider_name())
     }
 
+    pub fn response_label(&self) -> String {
+        if matches!(&self.provider, AgentProvider::Codex) {
+            format!("codex fork · parent {}", self.short_label())
+        } else {
+            self.short_label()
+        }
+    }
+
     fn provider_name(&self) -> &str {
         match &self.provider {
             AgentProvider::Codex => "codex",
@@ -519,5 +533,16 @@ mod tests {
                 "Review this"
             ]
         );
+    }
+
+    #[test]
+    fn codex_dispatch_forks_the_selected_interactive_session() {
+        let command = codex_fork_command("019a-session");
+        let args = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(args, ["exec", "fork", "019a-session", "-"]);
     }
 }

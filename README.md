@@ -168,7 +168,9 @@ Git revision arguments are passed directly to `git log`. For example:
   protocol and matched using Git origin or working directory.
 - Claude sessions are matched by reading only session ID, working directory,
   and file modification time from the local Claude project history.
-- Codex delivery resumes the target through `codex exec resume`.
+- Codex delivery forks the selected interactive session through
+  `codex exec fork`, then runs the review in that child session. This avoids
+  trying to resume an active app thread as a non-interactive exec session.
 - Claude delivery resumes the target through non-interactive
   `claude --resume` with unattended permission prompts denied.
 - `other` is reserved for future/custom adapters and does not execute a

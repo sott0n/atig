@@ -666,7 +666,7 @@ impl App {
             .unwrap_or_else(|| self.comments.clone());
         let prompt = format_review_request(&comments);
         let (tx, rx) = mpsc::channel();
-        self.dispatched_agent = Some(target.short_label());
+        self.dispatched_agent = Some(target.response_label());
         self.delivery_message = Some(format!("Sending review to {}...", target.short_label()));
         agent::dispatch(target, prompt, tx);
         self.dispatched_comments = comments;
