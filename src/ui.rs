@@ -6,7 +6,7 @@ use ratatui::{
     widgets::Paragraph,
 };
 
-use crate::app::{App, InputMode, View};
+use crate::app::{App, InputMode, ReviewComment, View};
 use crate::git::{CommitLine, HistoryLine, fit_column, format_refs};
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -322,22 +322,37 @@ fn draw_send_confirmation(frame: &mut Frame, app: &App, area: ratatui::layout::R
 fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
     let height = areas[0].height as usize;
     let commenting = app.input_mode == InputMode::Comment;
-    let diff_height = if commenting {
-        height.saturating_sub(3).max(1)
-    } else {
-        height
-    };
-    let start = diff_viewport_start(app, diff_height);
+    let mut start = diff_viewport_start(app, height);
+    let rows_before_selection = (start..app.diff_scroll)
+        .map(|index| rendered_diff_row_height(app, index, areas[0].width as usize))
+        .sum::<usize>();
+    let selected_rows = 1 + if commenting { 3 } else { 0 };
+    if rows_before_selection + selected_rows > height {
+        start = app.diff_scroll;
+    }
+
     let mut lines = Vec::with_capacity(height);
-    for (index, line) in app.diff.iter().enumerate().skip(start).take(diff_height) {
+    let mut comment_input_row = None;
+    for (index, line) in app.diff.iter().enumerate().skip(start) {
+        if lines.len() >= height {
+            break;
+        }
         lines.push(diff_line(
             line,
             app.diff_scroll == index,
             areas[0].width as usize,
         ));
         if commenting && app.diff_scroll == index {
+            comment_input_row = Some(lines.len() + 1);
             lines.extend(inline_comment_box(
                 &app.comment_buffer,
+                areas[0].width as usize,
+            ));
+        }
+        for (comment_index, comment) in comments_for_diff_line(app, index) {
+            lines.extend(saved_comment_box(
+                comment,
+                comment_index + 1,
                 areas[0].width as usize,
             ));
         }
@@ -373,8 +388,7 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
         );
         let input_y = areas[0]
             .y
-            .saturating_add(app.diff_scroll.saturating_sub(start) as u16)
-            .saturating_add(2)
+            .saturating_add(comment_input_row.unwrap_or(1) as u16)
             .min(areas[0].bottom().saturating_sub(1));
         let cursor_x = areas[0]
             .x
@@ -415,6 +429,55 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
         ),
         areas[1],
     );
+}
+
+fn comments_for_diff_line(
+    app: &App,
+    diff_index: usize,
+) -> impl Iterator<Item = (usize, &ReviewComment)> {
+    app.comments.iter().enumerate().filter(move |(_, comment)| {
+        comment.diff_index == diff_index && app.diff_oid.as_deref() == Some(comment.commit.as_str())
+    })
+}
+
+fn rendered_diff_row_height(app: &App, diff_index: usize, width: usize) -> usize {
+    1 + comments_for_diff_line(app, diff_index)
+        .map(|(comment_index, comment)| saved_comment_box(comment, comment_index + 1, width).len())
+        .sum::<usize>()
+}
+
+fn saved_comment_box(comment: &ReviewComment, number: usize, width: usize) -> Vec<Line<'static>> {
+    let border = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let body_style = Style::default().fg(Color::White).bg(Color::DarkGray);
+    let mut lines = vec![Line::styled(
+        boxed_label("╭─ ", &format!("Review comment #{number} "), "╮", width),
+        border,
+    )];
+    let content_width = width.saturating_sub(4).max(1);
+    for chunk in wrap_comment_body(&comment.body, content_width) {
+        let mut line = Line::styled(format!("│ {chunk}"), body_style);
+        line.push_span(Span::styled(
+            " ".repeat(width.saturating_sub(line.width() + 1)),
+            body_style,
+        ));
+        line.push_span(Span::styled("│", body_style.fg(Color::Yellow)));
+        lines.push(line);
+    }
+    lines.push(Line::styled(boxed_label("╰", "", "╯", width), border));
+    lines
+}
+
+fn wrap_comment_body(body: &str, width: usize) -> Vec<String> {
+    let characters = body.chars().collect::<Vec<_>>();
+    if characters.is_empty() {
+        return vec![String::new()];
+    }
+    characters
+        .chunks(width.max(1))
+        .map(|chunk| chunk.iter().collect())
+        .collect()
 }
 
 fn inline_comment_box(buffer: &str, width: usize) -> Vec<Line<'static>> {
@@ -700,5 +763,22 @@ mod tests {
         assert!(rendered[0].to_string().contains("Add review comment"));
         assert!(rendered[1].to_string().contains("Please simplify this"));
         assert!(rendered[2].to_string().contains("Enter save · Esc cancel"));
+    }
+
+    #[test]
+    fn saved_comment_box_wraps_and_fills_the_viewport() {
+        let comment = ReviewComment {
+            commit: "abc123".into(),
+            file: "src/main.rs".into(),
+            line: 12,
+            diff_index: 5,
+            body: "This comment is long enough to wrap".into(),
+        };
+
+        let rendered = saved_comment_box(&comment, 1, 24);
+
+        assert!(rendered.len() > 3);
+        assert!(rendered.iter().all(|line| line.width() == 24));
+        assert!(rendered[0].to_string().contains("Review comment #1"));
     }
 }

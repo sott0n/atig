@@ -67,7 +67,8 @@ also marked with `*` in the picker.
 Press `?` at any time in a normal view to see the key reference.
 
 When adding a comment, the editor opens directly below the selected diff line.
-Press `Enter` to save it or `Esc` to cancel.
+Press `Enter` to save it or `Esc` to cancel. Saved comments remain visible
+below their exact diff lines and long comments wrap inside the review block.
 
 ## Key bindings
 

@@ -34,6 +34,7 @@ pub struct ReviewComment {
     pub commit: String,
     pub file: String,
     pub line: usize,
+    pub diff_index: usize,
     pub body: String,
 }
 
@@ -42,6 +43,7 @@ struct CommentAnchor {
     commit: String,
     file: String,
     line: usize,
+    diff_index: usize,
 }
 
 pub struct App {
@@ -402,7 +404,12 @@ impl App {
         let Some(commit) = self.diff_oid.clone() else {
             return;
         };
-        self.comment_anchor = Some(CommentAnchor { commit, file, line });
+        self.comment_anchor = Some(CommentAnchor {
+            commit,
+            file,
+            line,
+            diff_index: self.diff_scroll,
+        });
         self.comment_buffer.clear();
         self.input_mode = InputMode::Comment;
     }
@@ -446,6 +453,7 @@ impl App {
             commit: anchor.commit,
             file: anchor.file,
             line: anchor.line,
+            diff_index: anchor.diff_index,
             body,
         });
         self.comment_buffer.clear();
@@ -1076,6 +1084,7 @@ mod tests {
                 commit: "abc123".into(),
                 file: "src/main.rs".into(),
                 line: 11,
+                diff_index: 5,
                 body: "Please simplify".into(),
             }]
         );
@@ -1089,6 +1098,7 @@ mod tests {
             commit: "abc123".into(),
             file: "src/main.rs".into(),
             line: 11,
+            diff_index: 5,
             body: "Old body".into(),
         });
 
@@ -1113,6 +1123,7 @@ mod tests {
             commit: "abc123".into(),
             file: "src/main.rs".into(),
             line: 4,
+            diff_index: 3,
             body: "Handle this error".into(),
         });
         app.request_send_review();
