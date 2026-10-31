@@ -7,6 +7,7 @@ that can be queued to an existing coding-agent session.
 The first development slice provides a streaming Git history view:
 
 - Git history is rendered as soon as git log produces output.
+- Large histories are consumed in bounded batches so input and drawing stay responsive.
 - j/k, arrow keys, gg, G, Ctrl-d, and Ctrl-u navigate commits.
 - :log <revision...> reloads the view with a Git revision specification.
 - :reload, :help, and :q provide the initial command interface.

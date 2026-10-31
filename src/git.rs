@@ -1,7 +1,11 @@
 use std::{
     io::{BufRead, BufReader, Read},
     process::{Command, Stdio},
-    sync::mpsc::Sender,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::Sender,
+    },
     thread,
 };
 
@@ -117,23 +121,50 @@ pub enum DiffEvent {
     Error(String),
 }
 
-pub fn stream_history(revisions: Vec<String>, sender: Sender<HistoryEvent>) {
+#[derive(Clone)]
+pub struct Cancellation(Arc<AtomicBool>);
+
+impl Cancellation {
+    fn new() -> Self {
+        Self(Arc::new(AtomicBool::new(false)))
+    }
+
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+pub fn stream_history(revisions: Vec<String>, sender: Sender<HistoryEvent>) -> Cancellation {
+    let cancellation = Cancellation::new();
+    let worker_cancellation = cancellation.clone();
     thread::spawn(move || {
-        if let Err(error) = run_git_log(&revisions, &sender) {
+        if let Err(error) = run_git_log(&revisions, &sender, &worker_cancellation) {
             let _ = sender.send(HistoryEvent::Error(error));
         }
     });
+    cancellation
 }
 
-pub fn stream_diff(oid: String, sender: Sender<DiffEvent>) {
+pub fn stream_diff(oid: String, sender: Sender<DiffEvent>) -> Cancellation {
+    let cancellation = Cancellation::new();
+    let worker_cancellation = cancellation.clone();
     thread::spawn(move || {
-        if let Err(error) = run_git_show(&oid, &sender) {
+        if let Err(error) = run_git_show(&oid, &sender, &worker_cancellation) {
             let _ = sender.send(DiffEvent::Error(error));
         }
     });
+    cancellation
 }
 
-fn run_git_show(oid: &str, sender: &Sender<DiffEvent>) -> Result<(), String> {
+fn run_git_show(
+    oid: &str,
+    sender: &Sender<DiffEvent>,
+    cancellation: &Cancellation,
+) -> Result<(), String> {
     let mut child = Command::new("git")
         .args([
             "--no-pager",
@@ -158,6 +189,10 @@ fn run_git_show(oid: &str, sender: &Sender<DiffEvent>) -> Result<(), String> {
         .ok_or_else(|| "Failed to capture git show error output".to_string())?;
 
     for line in BufReader::new(stdout).lines() {
+        if cancellation.is_cancelled() {
+            let _ = child.kill();
+            return Ok(());
+        }
         let line = line.map_err(|error| format!("Failed to read commit diff: {error}"))?;
         if sender.send(DiffEvent::Line(line)).is_err() {
             let _ = child.kill();
@@ -185,7 +220,11 @@ fn run_git_show(oid: &str, sender: &Sender<DiffEvent>) -> Result<(), String> {
     })
 }
 
-fn run_git_log(revisions: &[String], sender: &Sender<HistoryEvent>) -> Result<(), String> {
+fn run_git_log(
+    revisions: &[String],
+    sender: &Sender<HistoryEvent>,
+    cancellation: &Cancellation,
+) -> Result<(), String> {
     let mut command = Command::new("git");
     command
         .args([
@@ -215,6 +254,10 @@ fn run_git_log(revisions: &[String], sender: &Sender<HistoryEvent>) -> Result<()
         .ok_or_else(|| "Failed to capture git error output".to_string())?;
 
     for line in BufReader::new(stdout).lines() {
+        if cancellation.is_cancelled() {
+            let _ = child.kill();
+            return Ok(());
+        }
         let line = line.map_err(|error| format!("Failed to read git history: {error}"))?;
         if sender
             .send(HistoryEvent::Line(parse_history_line(&line)))

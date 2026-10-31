@@ -3,6 +3,8 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use crate::agent::{self, AgentTarget, DispatchEvent};
 use crate::git::{self, DiffEvent, HistoryEvent, HistoryLine};
 
+const MAX_EVENTS_PER_TICK: usize = 256;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
     Normal,
@@ -64,7 +66,9 @@ pub struct App {
     comment_edit_index: Option<usize>,
     dispatch_rx: Option<Receiver<DispatchEvent>>,
     history_rx: Option<Receiver<HistoryEvent>>,
+    history_cancel: Option<git::Cancellation>,
     diff_rx: Option<Receiver<DiffEvent>>,
+    diff_cancel: Option<git::Cancellation>,
     pending_graph: Option<String>,
 }
 
@@ -95,7 +99,9 @@ impl App {
             comment_edit_index: None,
             dispatch_rx: None,
             history_rx: None,
+            history_cancel: None,
             diff_rx: None,
+            diff_cancel: None,
             pending_graph: None,
         }
     }
@@ -110,7 +116,10 @@ impl App {
         };
         let oid = commit.oid.clone();
         let (tx, rx) = mpsc::channel();
-        git::stream_diff(oid.clone(), tx);
+        if let Some(cancellation) = self.diff_cancel.take() {
+            cancellation.cancel();
+        }
+        self.diff_cancel = Some(git::stream_diff(oid.clone(), tx));
         self.view = View::Diff;
         self.diff.clear();
         self.diff_oid = Some(oid);
@@ -126,6 +135,9 @@ impl App {
         self.pending_g = false;
         self.diff_jump_direction = None;
         self.diff_rx = None;
+        if let Some(cancellation) = self.diff_cancel.take() {
+            cancellation.cancel();
+        }
         self.diff_loading = false;
     }
 
@@ -356,7 +368,7 @@ impl App {
 
     pub fn drain_diff_events(&mut self) -> bool {
         let mut changed = false;
-        loop {
+        for _ in 0..MAX_EVENTS_PER_TICK {
             let event = match self.diff_rx.as_ref().map(Receiver::try_recv) {
                 Some(Ok(event)) => event,
                 Some(Err(TryRecvError::Empty)) | None => break,
@@ -373,11 +385,13 @@ impl App {
                 DiffEvent::Done => {
                     self.diff_loading = false;
                     self.diff_rx = None;
+                    self.diff_cancel = None;
                     self.message = format!("{} lines", self.diff.len());
                 }
                 DiffEvent::Error(error) => {
                     self.diff_loading = false;
                     self.diff_rx = None;
+                    self.diff_cancel = None;
                     self.message = error;
                 }
             }
@@ -386,8 +400,11 @@ impl App {
     }
 
     pub fn reload(&mut self) {
+        if let Some(cancellation) = self.history_cancel.take() {
+            cancellation.cancel();
+        }
         let (tx, rx) = mpsc::channel();
-        git::stream_history(self.revisions.clone(), tx);
+        self.history_cancel = Some(git::stream_history(self.revisions.clone(), tx));
         self.history.clear();
         self.selected = None;
         self.pending_graph = None;
@@ -402,7 +419,7 @@ impl App {
 
     pub fn drain_history_events(&mut self) -> bool {
         let mut changed = false;
-        loop {
+        for _ in 0..MAX_EVENTS_PER_TICK {
             let event = match self.history_rx.as_ref().map(Receiver::try_recv) {
                 Some(Ok(event)) => event,
                 Some(Err(TryRecvError::Empty)) | None => break,
@@ -429,10 +446,12 @@ impl App {
                 }
                 HistoryEvent::Done => {
                     self.loading = false;
+                    self.history_cancel = None;
                     self.message = format!("{} commits", self.commit_count());
                 }
                 HistoryEvent::Error(error) => {
                     self.loading = false;
+                    self.history_cancel = None;
                     self.message = error;
                 }
             }
@@ -585,6 +604,17 @@ impl App {
             (0..current)
                 .rev()
                 .find(|&index| self.history[index].commit().is_some())
+        }
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        if let Some(cancellation) = self.history_cancel.take() {
+            cancellation.cancel();
+        }
+        if let Some(cancellation) = self.diff_cancel.take() {
+            cancellation.cancel();
         }
     }
 }
@@ -828,5 +858,28 @@ mod tests {
         let prompt = format_review_request(&app.comments);
         assert!(prompt.contains("src/main.rs:4"));
         assert!(prompt.contains("Handle this error"));
+    }
+
+    #[test]
+    fn history_drain_yields_after_a_bounded_batch() {
+        let mut app = App::new();
+        let (tx, rx) = mpsc::channel();
+        for index in 0..300 {
+            let line = parse_history_line(&format!(
+                "* \u{1e}{index}\u{1f}{index}\u{1f}parent\u{1f}2026-01-01 00:00 +0000\u{1f}Alice\u{1f}\u{1f}commit"
+            ));
+            tx.send(HistoryEvent::Line(line)).unwrap();
+        }
+        tx.send(HistoryEvent::Done).unwrap();
+        app.history_rx = Some(rx);
+        app.loading = true;
+
+        app.drain_history_events();
+        assert_eq!(app.history.len(), MAX_EVENTS_PER_TICK);
+        assert!(app.loading);
+
+        app.drain_history_events();
+        assert_eq!(app.history.len(), 300);
+        assert!(!app.loading);
     }
 }
