@@ -75,6 +75,7 @@ pub struct App {
     pub comment_selected: usize,
     pub agent_target: Option<AgentTarget>,
     pub dispatching: bool,
+    pub delivery_message: Option<String>,
     pub search_input: String,
     pub search_query: String,
     pub sessions: Vec<AgentSession>,
@@ -120,6 +121,7 @@ impl App {
             comment_selected: 0,
             agent_target: None,
             dispatching: false,
+            delivery_message: None,
             search_input: String::new(),
             search_query: String::new(),
             sessions: Vec::new(),
@@ -618,11 +620,15 @@ impl App {
     pub fn request_send_review(&mut self) {
         if self.dispatching {
             self.message = "A review is already being delivered".into();
+            self.delivery_message = Some("Send blocked: a review is already sending".into());
         } else if self.agent_target.is_none() {
             self.message = "Set a target with :session <provider> <id>".into();
+            self.delivery_message = Some("Send blocked: select an agent session with s".into());
         } else if self.comments.is_empty() {
             self.message = "No review comments to send".into();
+            self.delivery_message = Some("Send blocked: no review comments".into());
         } else {
+            self.delivery_message = None;
             self.pending_send_comment_index = if self.view == View::Diff {
                 self.diff_comment_selected
                     .filter(|&index| index < self.comments.len())
@@ -637,10 +643,15 @@ impl App {
         self.pending_send_comment_index
     }
 
+    pub fn dismiss_delivery_message(&mut self) {
+        self.delivery_message = None;
+    }
+
     pub fn cancel_send_review(&mut self) {
         self.input_mode = InputMode::Normal;
         self.pending_send_comment_index = None;
         self.message = "Review delivery cancelled".into();
+        self.delivery_message = Some("Send cancelled".into());
     }
 
     pub fn confirm_send_review(&mut self) {
@@ -656,6 +667,7 @@ impl App {
         let prompt = format_review_request(&comments);
         let (tx, rx) = mpsc::channel();
         self.dispatched_agent = Some(target.short_label());
+        self.delivery_message = Some(format!("Sending review to {}...", target.short_label()));
         agent::dispatch(target, prompt, tx);
         self.dispatched_comments = comments;
         self.pending_send_comment_index = None;
@@ -697,11 +709,13 @@ impl App {
                 } else {
                     format!("Agent response attached to {attached} comments")
                 };
+                self.delivery_message = Some(self.message.clone());
             }
             DispatchEvent::Error(error) => {
                 self.dispatched_comments.clear();
                 self.dispatched_agent = None;
-                self.message = error;
+                self.message = error.clone();
+                self.delivery_message = Some(format!("Send failed: {error}"));
             }
         }
         true
@@ -1299,6 +1313,10 @@ mod tests {
         let mut app = App::new();
         app.request_send_review();
         assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(
+            app.delivery_message.as_deref(),
+            Some("Send blocked: select an agent session with s")
+        );
 
         app.agent_target = Some(AgentTarget::parse("codex", "session-1").unwrap());
         app.comments.push(ReviewComment {

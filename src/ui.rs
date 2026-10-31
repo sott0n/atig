@@ -252,11 +252,13 @@ fn draw_comments(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) 
         draw_comment_prompt(frame, app, areas[1]);
         return;
     }
-    let status = format!(
-        "Review comments - {} total{} - j/k move  e edit  d delete  q back",
-        app.comments.len(),
-        agent_target_suffix(app)
-    );
+    let status = app.delivery_message.clone().unwrap_or_else(|| {
+        format!(
+            "Review comments - {} total{} - j/k move  e edit  d delete  q back",
+            app.comments.len(),
+            agent_target_suffix(app)
+        )
+    });
     frame.render_widget(
         Paragraph::new(status).style(
             Style::default()
@@ -420,7 +422,9 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
     } else {
         app.diff_scroll + 1
     };
-    let left = if let Some(comment_index) = app.diff_comment_selected {
+    let left = if let Some(message) = &app.delivery_message {
+        message.clone()
+    } else if let Some(comment_index) = app.diff_comment_selected {
         format!(
             "Review #{} - Enter edit  S send - {} comments{}{}",
             comment_index + 1,

@@ -321,21 +321,27 @@ fn dispatch_codex(session_id: &str, prompt: &str) -> Result<String, String> {
 }
 
 fn dispatch_claude(session_id: &str, prompt: &str) -> Result<String, String> {
-    let child = Command::new("claude")
+    let child = claude_command(session_id, prompt)
+        .spawn()
+        .map_err(|error| format!("Failed to start Claude: {error}"))?;
+    finish_dispatch(child, "Claude")
+}
+
+fn claude_command(session_id: &str, prompt: &str) -> Command {
+    let mut command = Command::new("claude");
+    command
         .args([
             "-p",
             "--resume",
             session_id,
-            "--permission-prompts",
-            "none",
+            "--permission-mode",
+            "dontAsk",
             prompt,
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("Failed to start Claude: {error}"))?;
-    finish_dispatch(child, "Claude")
+        .stderr(Stdio::piped());
+    command
 }
 
 fn finish_dispatch(child: std::process::Child, name: &str) -> Result<String, String> {
@@ -491,6 +497,27 @@ mod tests {
         assert_eq!(
             normalize_agent_response(b"\r\n"),
             "Agent completed without a text response."
+        );
+    }
+
+    #[test]
+    fn claude_dispatch_uses_supported_noninteractive_permission_mode() {
+        let command = claude_command("session-1", "Review this");
+        let args = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            args,
+            [
+                "-p",
+                "--resume",
+                "session-1",
+                "--permission-mode",
+                "dontAsk",
+                "Review this"
+            ]
         );
     }
 }

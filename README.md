@@ -190,6 +190,8 @@ Delivery is deliberately conservative:
 - A destination must be configured explicitly.
 - Session IDs accept only letters, numbers, `-`, `_`, `.`, and `:`.
 - `S` always shows a destination confirmation before delivery.
+- Send progress and CLI errors are shown in the diff or comment-list status
+  bar instead of being hidden behind the normal navigation status.
 - Agent CLIs are launched without a shell and without sandbox or approval
   bypass flags.
 - Comments remain visible after delivery, and responses are attached only to

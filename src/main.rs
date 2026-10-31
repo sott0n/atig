@@ -49,6 +49,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
             continue;
         }
         needs_draw = true;
+        app.dismiss_delivery_message();
 
         if app.input_mode == InputMode::ConfirmSend {
             if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
@@ -117,7 +118,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                     }
                     (KeyCode::Char('e'), KeyModifiers::NONE) => app.edit_selected_comment(),
                     (KeyCode::Char('d'), KeyModifiers::NONE) => app.delete_selected_comment(),
-                    (KeyCode::Char('S'), KeyModifiers::SHIFT) => app.request_send_review(),
+                    (KeyCode::Char('S'), _) => app.request_send_review(),
                     (KeyCode::Char('s'), KeyModifiers::NONE) => app.open_sessions(),
                     (KeyCode::Char('?'), _) => app.open_help(),
                     _ => {}
@@ -188,7 +189,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 (KeyCode::Enter, KeyModifiers::NONE) => app.edit_inline_comment(),
                 (KeyCode::Char('v'), KeyModifiers::NONE) => app.open_comments(),
                 (KeyCode::Char(':'), KeyModifiers::NONE) => app.start_command(),
-                (KeyCode::Char('S'), KeyModifiers::SHIFT) => app.request_send_review(),
+                (KeyCode::Char('S'), _) => app.request_send_review(),
                 (KeyCode::Char('s'), KeyModifiers::NONE) => app.open_sessions(),
                 (KeyCode::Char('/'), KeyModifiers::NONE) => app.start_search(),
                 (KeyCode::Char('n'), KeyModifiers::NONE) => app.repeat_search(1),
