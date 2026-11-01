@@ -27,6 +27,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
         draw_comments(frame, app, &areas);
         return;
     }
+    if app.view == View::Files {
+        draw_files(frame, app, &areas);
+        return;
+    }
     if app.view == View::Sessions {
         draw_sessions(frame, app, &areas);
         return;
@@ -128,6 +132,7 @@ fn draw_help(frame: &mut Frame, areas: &[ratatui::layout::Rect]) {
         "V, move, a        review a line range",
         "F / C             review file / commit",
         "v                 view review comments",
+        "t                 changed file navigator",
         "s                 select an agent session",
         "S                 send review comments",
         "X                 view Agent changes",
@@ -140,6 +145,62 @@ fn draw_help(frame: &mut Frame, areas: &[ratatui::layout::Rect]) {
     frame.render_widget(Paragraph::new(Text::from(lines)), areas[0]);
     frame.render_widget(
         Paragraph::new("Help - q, Esc, or ? to return").style(
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        ),
+        areas[1],
+    );
+}
+
+fn draw_files(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
+    let files = app.diff_files();
+    let height = areas[0].height as usize;
+    let start = app
+        .file_selected
+        .saturating_sub((height / 4).max(1))
+        .min(files.len().saturating_sub(height));
+    let lines = files
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(height)
+        .map(|(index, file)| {
+            let marker = if file.agent_changed { "◆" } else { " " };
+            let reviews = if file.review_count == 0 {
+                String::new()
+            } else {
+                format!("  ●{}", file.review_count)
+            };
+            let text = format!(" {marker} {}{reviews}", file.path);
+            if index == app.file_selected {
+                let mut line = Line::styled(
+                    text,
+                    Style::default()
+                        .fg(Color::White)
+                        .bg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                );
+                line.push_span(Span::raw(
+                    " ".repeat((areas[0].width as usize).saturating_sub(line.width())),
+                ));
+                line
+            } else {
+                Line::styled(
+                    text,
+                    Style::default().fg(if file.agent_changed {
+                        Color::Magenta
+                    } else {
+                        Color::White
+                    }),
+                )
+            }
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(Text::from(lines)), areas[0]);
+    frame.render_widget(
+        Paragraph::new("◆ Agent changed  ● reviews  j/k move  Enter jump  q back").style(
             Style::default()
                 .fg(Color::White)
                 .bg(Color::Blue)

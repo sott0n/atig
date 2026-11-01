@@ -100,6 +100,24 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
             continue;
         }
 
+        if app.view == View::Files {
+            match (key.code, key.modifiers) {
+                (KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('t'), KeyModifiers::NONE) => {
+                    app.close_files()
+                }
+                (KeyCode::Char('j') | KeyCode::Down, KeyModifiers::NONE) => {
+                    app.move_file_selection(1)
+                }
+                (KeyCode::Char('k') | KeyCode::Up, KeyModifiers::NONE) => {
+                    app.move_file_selection(-1)
+                }
+                (KeyCode::Enter, KeyModifiers::NONE) => app.select_diff_file(),
+                (KeyCode::Char('?'), _) => app.open_help(),
+                _ => {}
+            }
+            continue;
+        }
+
         if app.view == View::Comments {
             if app.input_mode == InputMode::Comment {
                 match key.code {
@@ -208,6 +226,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 (KeyCode::Char('C'), KeyModifiers::SHIFT) => app.start_commit_comment(),
                 (KeyCode::Enter, KeyModifiers::NONE) => app.edit_inline_comment(),
                 (KeyCode::Char('v'), KeyModifiers::NONE) => app.open_comments(),
+                (KeyCode::Char('t'), KeyModifiers::NONE) => app.open_files(),
                 (KeyCode::Char(':'), KeyModifiers::NONE) => app.start_command(),
                 (KeyCode::Char('S'), _) => app.request_send_review(),
                 (KeyCode::Char('X'), KeyModifiers::SHIFT) => app.view_agent_changes(),

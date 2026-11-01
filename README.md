@@ -115,6 +115,7 @@ the selected agent session.
 | `C` | Add a comment for the whole commit |
 | `Enter` | Edit a review comment, or reply to a selected thread message |
 | `v` | Open the review comment list |
+| `t` | Open the changed-file navigator (`◆` Agent change, `●` review count) |
 | `S` | Send the selected inline comment, or all comments when a code line is selected |
 | `X` | Open the working-tree diff produced by the last Agent run |
 | `s` | Open the repository agent-session picker |

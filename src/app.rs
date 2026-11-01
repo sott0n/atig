@@ -22,6 +22,7 @@ pub enum View {
     History,
     Diff,
     Comments,
+    Files,
     Help,
     Sessions,
 }
@@ -97,6 +98,14 @@ pub struct ReviewComment {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffFileSummary {
+    pub path: String,
+    pub diff_index: usize,
+    pub review_count: usize,
+    pub agent_changed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct CommentAnchor {
     commit: String,
     scope: ReviewScope,
@@ -127,6 +136,7 @@ pub struct App {
     pub comments: Vec<ReviewComment>,
     pub comment_buffer: String,
     pub comment_selected: usize,
+    pub file_selected: usize,
     pub agent_target: Option<AgentTarget>,
     pub dispatching: bool,
     pub delivery_message: Option<String>,
@@ -181,6 +191,7 @@ impl App {
             comments: Vec::new(),
             comment_buffer: String::new(),
             comment_selected: 0,
+            file_selected: 0,
             agent_target: None,
             dispatching: false,
             delivery_message: None,
@@ -446,7 +457,7 @@ impl App {
             View::Diff => find_wrapped(self.diff.len(), self.diff_scroll, direction, |index| {
                 self.diff[index].to_lowercase().contains(&query)
             }),
-            View::Comments | View::Help | View::Sessions => None,
+            View::Comments | View::Files | View::Help | View::Sessions => None,
         };
         match (self.view, destination) {
             (View::History, Some(index)) => self.selected = Some(index),
@@ -842,6 +853,72 @@ impl App {
         self.comment_buffer.clear();
         self.comment_edit_index = None;
         self.comment_followup_index = None;
+    }
+
+    pub fn diff_files(&self) -> Vec<DiffFileSummary> {
+        self.diff
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.starts_with("diff --git "))
+            .filter_map(|(diff_index, _)| {
+                let (path, _) = diff_file_anchor(&self.diff, diff_index)?;
+                let review_count = self
+                    .comments
+                    .iter()
+                    .filter(|comment| {
+                        comment.commit == self.diff_oid.as_deref().unwrap_or_default()
+                            && comment.scope.file() == Some(path.as_str())
+                    })
+                    .count();
+                Some(DiffFileSummary {
+                    agent_changed: self
+                        .last_agent_changes
+                        .iter()
+                        .any(|changed| changed == &path),
+                    path,
+                    diff_index,
+                    review_count,
+                })
+            })
+            .collect()
+    }
+
+    pub fn open_files(&mut self) {
+        let files = self.diff_files();
+        if files.is_empty() {
+            self.message = "No changed files".into();
+            return;
+        }
+        self.file_selected = files
+            .iter()
+            .position(|file| file.diff_index >= self.diff_scroll)
+            .unwrap_or(files.len() - 1);
+        self.view = View::Files;
+    }
+
+    pub fn close_files(&mut self) {
+        self.view = View::Diff;
+    }
+
+    pub fn move_file_selection(&mut self, amount: isize) {
+        let count = self.diff_files().len();
+        if amount < 0 {
+            self.file_selected = self.file_selected.saturating_sub(amount.unsigned_abs());
+        } else {
+            self.file_selected = self
+                .file_selected
+                .saturating_add(amount as usize)
+                .min(count.saturating_sub(1));
+        }
+    }
+
+    pub fn select_diff_file(&mut self) {
+        if let Some(file) = self.diff_files().get(self.file_selected) {
+            self.diff_scroll = file.diff_index;
+            self.diff_comment_selected = None;
+            self.diff_thread_selected = None;
+        }
+        self.view = View::Diff;
     }
 
     pub fn move_comment_selection(&mut self, amount: isize) {
@@ -2080,6 +2157,43 @@ mod tests {
             changed_paths(&before, &after),
             ["added.rs", "changed.rs", "removed.rs"]
         );
+    }
+
+    #[test]
+    fn file_navigator_counts_reviews_and_marks_agent_changes() {
+        let mut app = App::new();
+        app.diff_oid = Some("WORKTREE".into());
+        app.diff = vec![
+            "diff --git a/src/a.rs b/src/a.rs".into(),
+            "--- a/src/a.rs".into(),
+            "+++ b/src/a.rs".into(),
+            "@@ -1 +1 @@".into(),
+            "+a".into(),
+            "diff --git a/src/b.rs b/src/b.rs".into(),
+            "--- a/src/b.rs".into(),
+            "+++ b/src/b.rs".into(),
+        ];
+        app.comments.push(ReviewComment {
+            commit: "WORKTREE".into(),
+            scope: ReviewScope::File("src/a.rs".into()),
+            diff_index: 0,
+            body: "Review A".into(),
+            context: Vec::new(),
+            thread: Vec::new(),
+        });
+        app.last_agent_changes = vec!["src/b.rs".into()];
+
+        let files = app.diff_files();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].review_count, 1);
+        assert!(!files[0].agent_changed);
+        assert!(files[1].agent_changed);
+
+        app.open_files();
+        app.move_file_selection(1);
+        app.select_diff_file();
+        assert_eq!(app.view, View::Diff);
+        assert_eq!(app.diff_scroll, 5);
     }
 
     #[test]
