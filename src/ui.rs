@@ -132,6 +132,8 @@ fn draw_help(frame: &mut Frame, areas: &[ratatui::layout::Rect]) {
         "atig keys",
         "",
         "j/k, arrows       move",
+        "Context h/l       scroll code left / right",
+        "Context 0/$       code line start / end",
         "gg / G            first / last",
         "Ctrl-d / Ctrl-u   half page down / up",
         "Ctrl-f / Ctrl-b   full page down / up",
@@ -251,13 +253,20 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
         if lines.len() >= height {
             break;
         }
+        let selection = if index == app.context_cursor {
+            SourceSelection::Cursor
+        } else if app.context_line_is_selected(index + 1) {
+            SourceSelection::Range
+        } else {
+            SourceSelection::None
+        };
         lines.push(source_line(
             index + 1,
             text,
             number_width,
-            index == app.context_cursor,
-            app.context_line_is_selected(index + 1),
+            selection,
             app.context_change_side(index + 1),
+            app.context_horizontal_scroll,
             areas[0].width as usize,
         ));
         for (turn, thread) in app
@@ -314,10 +323,11 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
             format!("VISUAL LINES {start}-{end} · Q ask range · V/Esc cancel")
         } else {
             format!(
-                "{} · {} · line {position}/{} · / file · * repo · Q ask · R guide · T trail · [c/]c changes · [r/]r trail · ^o/^i history · b diff",
+                "{} · {} · line {position}/{} · col {} · h/l horizontal · / file · * repo · Q ask · R guide · T trail · [c/]c changes · [r/]r trail · ^o/^i history · b diff",
                 app.context_path,
                 app.context_version,
-                app.context_lines.len()
+                app.context_lines.len(),
+                app.context_horizontal_scroll + 1
             )
         }
     });
@@ -452,13 +462,20 @@ fn reading_trail_lines(app: &App) -> Vec<Line<'static>> {
         .collect()
 }
 
+#[derive(Clone, Copy)]
+enum SourceSelection {
+    None,
+    Cursor,
+    Range,
+}
+
 fn source_line(
     number: usize,
     text: &str,
     number_width: usize,
-    selected: bool,
-    in_range: bool,
+    selection: SourceSelection,
     changed_side: Option<crate::git::DiffSide>,
+    horizontal_scroll: usize,
     viewport_width: usize,
 ) -> Line<'static> {
     let marker = match changed_side {
@@ -467,7 +484,12 @@ fn source_line(
         None => ' ',
     };
     let prefix = format!("{marker}{number:>number_width$} │ ");
-    if selected {
+    let visible_text = visible_source_text(
+        text,
+        horizontal_scroll,
+        viewport_width.saturating_sub(prefix.chars().count()),
+    );
+    if matches!(selection, SourceSelection::Cursor) {
         let mut line = Line::from(vec![
             Span::styled(
                 prefix,
@@ -477,7 +499,7 @@ fn source_line(
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                text.to_string(),
+                visible_text,
                 Style::default().fg(Color::Black).bg(Color::Green),
             ),
         ]);
@@ -486,7 +508,7 @@ fn source_line(
             Style::default().bg(Color::Green),
         ));
         line
-    } else if in_range {
+    } else if matches!(selection, SourceSelection::Range) {
         let mut line = Line::from(vec![
             Span::styled(
                 prefix,
@@ -496,7 +518,7 @@ fn source_line(
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                text.to_string(),
+                visible_text,
                 Style::default().fg(Color::White).bg(Color::DarkGray),
             ),
         ]);
@@ -513,9 +535,30 @@ fn source_line(
         };
         Line::from(vec![
             Span::styled(prefix, Style::default().fg(marker_color)),
-            Span::raw(text.to_string()),
+            Span::raw(visible_text),
         ])
     }
+}
+
+fn visible_source_text(text: &str, offset: usize, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let characters = text.chars().collect::<Vec<_>>();
+    let offset = offset.min(characters.len());
+    let left = usize::from(offset > 0);
+    let available_without_left = width.saturating_sub(left);
+    let right = usize::from(characters.len().saturating_sub(offset) > available_without_left);
+    let body_width = width.saturating_sub(left + right);
+    let mut visible = String::new();
+    if left > 0 {
+        visible.push('‹');
+    }
+    visible.extend(characters.iter().skip(offset).take(body_width));
+    if right > 0 {
+        visible.push('›');
+    }
+    visible
 }
 
 fn draw_files(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
@@ -1472,7 +1515,15 @@ mod tests {
 
     #[test]
     fn selected_source_line_includes_a_line_number_and_fills_the_viewport() {
-        let rendered = source_line(12, "let answer = 42;", 3, true, false, None, 40);
+        let rendered = source_line(
+            12,
+            "let answer = 42;",
+            3,
+            SourceSelection::Cursor,
+            None,
+            0,
+            40,
+        );
 
         assert!(rendered.to_string().contains("  12 │ let answer = 42;"));
         assert_eq!(rendered.width(), 40);
@@ -1484,9 +1535,9 @@ mod tests {
             12,
             "let answer = 42;",
             3,
-            false,
-            false,
+            SourceSelection::None,
             Some(crate::git::DiffSide::New),
+            0,
             40,
         );
 
@@ -1496,11 +1547,26 @@ mod tests {
 
     #[test]
     fn visually_selected_source_range_fills_the_viewport() {
-        let rendered = source_line(12, "let answer = 42;", 3, false, true, None, 40);
+        let rendered = source_line(
+            12,
+            "let answer = 42;",
+            3,
+            SourceSelection::Range,
+            None,
+            0,
+            40,
+        );
 
         assert_eq!(rendered.style.bg, None);
         assert_eq!(rendered.spans[0].style.bg, Some(Color::DarkGray));
         assert_eq!(rendered.width(), 40);
+    }
+
+    #[test]
+    fn horizontally_scrolled_source_shows_hidden_text_indicators() {
+        assert_eq!(visible_source_text("0123456789", 0, 6), "01234›");
+        assert_eq!(visible_source_text("0123456789", 4, 6), "‹4567›");
+        assert_eq!(visible_source_text("0123456789", 7, 6), "‹789");
     }
 
     #[test]

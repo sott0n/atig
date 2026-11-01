@@ -182,6 +182,7 @@ struct ContextLocation {
     line: usize,
     side: git::DiffSide,
     reading_index: Option<usize>,
+    horizontal_scroll: usize,
 }
 
 pub struct App {
@@ -208,6 +209,7 @@ pub struct App {
     pub context_path: String,
     pub context_lines: Vec<String>,
     pub context_cursor: usize,
+    pub context_horizontal_scroll: usize,
     pub context_range_start: Option<usize>,
     pub context_version: String,
     context_changed_lines: Vec<usize>,
@@ -288,6 +290,7 @@ impl App {
             context_path: String::new(),
             context_lines: Vec::new(),
             context_cursor: 0,
+            context_horizontal_scroll: 0,
             context_range_start: None,
             context_version: String::new(),
             context_changed_lines: Vec::new(),
@@ -1311,6 +1314,7 @@ impl App {
                 self.context_side = side;
                 self.context_changed_lines = diff_changed_lines(&self.diff, path, side);
                 self.context_range_start = None;
+                self.context_horizontal_scroll = 0;
                 true
             }
             Err(error) => {
@@ -1372,6 +1376,45 @@ impl App {
                 .saturating_add(amount as usize)
                 .min(self.context_lines.len().saturating_sub(1));
         }
+    }
+
+    pub fn move_context_horizontal(&mut self, amount: isize) {
+        self.pending_g = false;
+        self.context_jump_direction = None;
+        if amount < 0 {
+            self.context_horizontal_scroll = self
+                .context_horizontal_scroll
+                .saturating_sub(amount.unsigned_abs());
+        } else {
+            let line_width = self
+                .context_lines
+                .get(self.context_cursor)
+                .map(|line| line.chars().count())
+                .unwrap_or(0);
+            self.context_horizontal_scroll = self
+                .context_horizontal_scroll
+                .saturating_add(amount as usize)
+                .min(line_width.saturating_sub(1));
+        }
+    }
+
+    pub fn reset_context_horizontal(&mut self) {
+        self.context_horizontal_scroll = 0;
+        self.pending_g = false;
+        self.context_jump_direction = None;
+    }
+
+    pub fn select_context_line_end_horizontal(&mut self, viewport_width: usize) {
+        let number_width = self.context_lines.len().max(1).to_string().len();
+        let content_width = viewport_width.saturating_sub(number_width + 4).max(1);
+        let line_width = self
+            .context_lines
+            .get(self.context_cursor)
+            .map(|line| line.chars().count())
+            .unwrap_or(0);
+        self.context_horizontal_scroll = line_width.saturating_sub(content_width);
+        self.pending_g = false;
+        self.context_jump_direction = None;
     }
 
     pub fn handle_context_g(&mut self) {
@@ -1488,6 +1531,7 @@ impl App {
             line: self.context_cursor + 1,
             side: self.context_side,
             reading_index: self.context_reading_index,
+            horizontal_scroll: self.context_horizontal_scroll,
         })
     }
 
@@ -1499,6 +1543,7 @@ impl App {
         let current = self.current_context_location();
         if self.load_context_file(&target.path, target.line, target.side) {
             self.context_reading_index = target.reading_index;
+            self.context_horizontal_scroll = target.horizontal_scroll;
             if let Some(current) = current {
                 self.context_forward_stack.push(current);
             }
@@ -1516,6 +1561,7 @@ impl App {
         let current = self.current_context_location();
         if self.load_context_file(&target.path, target.line, target.side) {
             self.context_reading_index = target.reading_index;
+            self.context_horizontal_scroll = target.horizontal_scroll;
             if let Some(current) = current {
                 self.context_back_stack.push(current);
             }
@@ -2841,6 +2887,23 @@ mod tests {
     }
 
     #[test]
+    fn context_horizontal_navigation_is_bounded_to_the_current_line() {
+        let mut app = App::new();
+        app.context_lines = vec!["0123456789abcdef".into()];
+
+        app.move_context_horizontal(4);
+        assert_eq!(app.context_horizontal_scroll, 4);
+        app.move_context_horizontal(100);
+        assert_eq!(app.context_horizontal_scroll, 15);
+        app.move_context_horizontal(-6);
+        assert_eq!(app.context_horizontal_scroll, 9);
+        app.select_context_line_end_horizontal(12);
+        assert_eq!(app.context_horizontal_scroll, 9);
+        app.reset_context_horizontal();
+        assert_eq!(app.context_horizontal_scroll, 0);
+    }
+
+    #[test]
     fn context_visual_selection_normalizes_its_line_range() {
         let mut app = App::new();
         app.context_lines = (1..=20).map(|line| line.to_string()).collect();
@@ -3324,12 +3387,14 @@ mod tests {
         app.diff_source = Some(git::DiffSource::Worktree);
         app.diff_scroll = 5;
         app.open_context();
+        app.context_horizontal_scroll = 7;
         assert_eq!(app.view, View::Context);
         assert_eq!(app.context_reading_path.len(), 1);
         app.begin_context_jump(1);
         app.complete_context_reading_jump();
         assert_eq!(app.context_path, "Cargo.toml");
         assert_eq!(app.context_reading_index, Some(0));
+        assert_eq!(app.context_horizontal_scroll, 0);
         assert_eq!(app.context_reading_visited, BTreeSet::from([0]));
         assert_eq!(app.message, "Read: Understand the crate context");
         app.toggle_context_reading_trail();
@@ -3337,9 +3402,11 @@ mod tests {
         app.context_history_back();
         assert_eq!(app.context_path, "src/main.rs");
         assert_eq!(app.context_cursor, 0);
+        assert_eq!(app.context_horizontal_scroll, 7);
         app.context_history_forward();
         assert_eq!(app.context_path, "Cargo.toml");
         assert_eq!(app.context_reading_index, Some(0));
+        assert_eq!(app.context_horizontal_scroll, 0);
 
         app.toggle_agent_intents();
         assert!(!app.show_agent_intents);

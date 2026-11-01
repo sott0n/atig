@@ -188,7 +188,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 }
                 continue;
             }
-            let (_, terminal_height) = crossterm::terminal::size()?;
+            let (terminal_width, terminal_height) = crossterm::terminal::size()?;
             let page = terminal_height.saturating_sub(1).max(1) as isize;
             let half_page = (page / 2).max(1);
             match (key.code, key.modifiers) {
@@ -199,6 +199,16 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 }
                 (KeyCode::Char('j') | KeyCode::Down, KeyModifiers::NONE) => app.move_context(1),
                 (KeyCode::Char('k') | KeyCode::Up, KeyModifiers::NONE) => app.move_context(-1),
+                (KeyCode::Char('h') | KeyCode::Left, KeyModifiers::NONE) => {
+                    app.move_context_horizontal(-4)
+                }
+                (KeyCode::Char('l') | KeyCode::Right, KeyModifiers::NONE) => {
+                    app.move_context_horizontal(4)
+                }
+                (KeyCode::Char('0'), KeyModifiers::NONE) => app.reset_context_horizontal(),
+                (KeyCode::Char('$'), _) => {
+                    app.select_context_line_end_horizontal(terminal_width as usize)
+                }
                 (KeyCode::Char('J'), KeyModifiers::SHIFT) => app.move_context(10),
                 (KeyCode::Char('K'), KeyModifiers::SHIFT) => app.move_context(-10),
                 (KeyCode::Char('d'), KeyModifiers::CONTROL) => app.move_context(half_page),
