@@ -110,6 +110,7 @@ the selected agent session.
 | `/` | Search diff text |
 | `n`, `N` | Repeat the search forward or backward |
 | `a` | Add a comment to the selected diff line |
+| `V`, then `j`/`k`, `a` | Select a line range and add a range comment |
 | `F` | Add a comment for the current file |
 | `C` | Add a comment for the whole commit |
 | `Enter` | Edit a review comment, or reply to a selected thread message |

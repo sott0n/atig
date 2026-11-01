@@ -152,9 +152,22 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
             let page = terminal_height.saturating_sub(1).max(1) as isize;
             let half_page = (page / 2).max(1);
             match (key.code, key.modifiers) {
+                (KeyCode::Esc, KeyModifiers::NONE) if app.cancel_range_selection() => {}
                 (KeyCode::Esc | KeyCode::Char('q'), KeyModifiers::NONE) => app.close_diff(),
-                (KeyCode::Char('j') | KeyCode::Down, KeyModifiers::NONE) => app.move_diff_cursor(1),
-                (KeyCode::Char('k') | KeyCode::Up, KeyModifiers::NONE) => app.move_diff_cursor(-1),
+                (KeyCode::Char('j') | KeyCode::Down, KeyModifiers::NONE) => {
+                    if app.range_start.is_some() {
+                        app.move_diff(1);
+                    } else {
+                        app.move_diff_cursor(1);
+                    }
+                }
+                (KeyCode::Char('k') | KeyCode::Up, KeyModifiers::NONE) => {
+                    if app.range_start.is_some() {
+                        app.move_diff(-1);
+                    } else {
+                        app.move_diff_cursor(-1);
+                    }
+                }
                 (KeyCode::Char('J'), KeyModifiers::SHIFT) => app.move_diff(10),
                 (KeyCode::Char('K'), KeyModifiers::SHIFT) => app.move_diff(-10),
                 (KeyCode::Char('d'), KeyModifiers::CONTROL) => app.move_diff(half_page),
@@ -187,6 +200,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 (KeyCode::Tab, _) => app.jump_diff(DiffTarget::File, 1),
                 (KeyCode::BackTab, _) => app.jump_diff(DiffTarget::File, -1),
                 (KeyCode::Char('a'), KeyModifiers::NONE) => app.start_comment(),
+                (KeyCode::Char('V'), KeyModifiers::SHIFT) => app.toggle_range_selection(),
                 (KeyCode::Char('F'), KeyModifiers::SHIFT) => app.start_file_comment(),
                 (KeyCode::Char('C'), KeyModifiers::SHIFT) => app.start_commit_comment(),
                 (KeyCode::Enter, KeyModifiers::NONE) => app.edit_inline_comment(),

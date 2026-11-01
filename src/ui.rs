@@ -125,6 +125,7 @@ fn draw_help(frame: &mut Frame, areas: &[ratatui::layout::Rect]) {
         "/, n, N           search / next / previous",
         "r                 reload",
         "a                 add review comment",
+        "V, move, a        review a line range",
         "F / C             review file / commit",
         "v                 view review comments",
         "s                 select an agent session",
@@ -351,7 +352,8 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
         }
         lines.push(diff_line(
             line,
-            app.diff_scroll == index && app.diff_comment_selected.is_none(),
+            (app.diff_scroll == index && app.diff_comment_selected.is_none())
+                || app.range_contains(index),
             areas[0].width as usize,
         ));
         if commenting && app.diff_scroll == index && app.followup_comment_index().is_none() {
@@ -436,7 +438,13 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
     } else {
         app.diff_scroll + 1
     };
-    let left = if let Some(message) = &app.delivery_message {
+    let left = if let Some(start) = app.range_start {
+        format!(
+            "RANGE {}-{} - move j/k, a comment, Esc cancel",
+            start.min(app.diff_scroll) + 1,
+            start.max(app.diff_scroll) + 1
+        )
+    } else if let Some(message) = &app.delivery_message {
         message.clone()
     } else if let Some(comment_index) = app.diff_comment_selected {
         let action = if app.diff_thread_selected.is_some() {
@@ -929,6 +937,7 @@ mod tests {
             },
             diff_index: 5,
             body: "This comment is long enough to wrap".into(),
+            context: Vec::new(),
             thread: Vec::new(),
         };
 
@@ -962,6 +971,7 @@ mod tests {
             },
             diff_index: 5,
             body: "Please simplify".into(),
+            context: Vec::new(),
             thread: vec![crate::app::ReviewThreadMessage {
                 role: ReviewThreadRole::Agent("codex:session-1".into()),
                 body: "Implemented.\nTests pass.".into(),

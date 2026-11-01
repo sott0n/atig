@@ -45,7 +45,15 @@ pub struct ReviewThreadMessage {
 pub enum ReviewScope {
     Commit,
     File(String),
-    Line { file: String, line: usize },
+    Line {
+        file: String,
+        line: usize,
+    },
+    Range {
+        file: String,
+        start: usize,
+        end: usize,
+    },
 }
 
 impl ReviewScope {
@@ -54,6 +62,7 @@ impl ReviewScope {
             Self::Commit => "COMMIT".into(),
             Self::File(file) => format!("FILE · {file}"),
             Self::Line { file, line } => format!("LINE · {file}:{line}"),
+            Self::Range { file, start, end } => format!("RANGE · {file}:{start}-{end}"),
         }
     }
 
@@ -62,6 +71,7 @@ impl ReviewScope {
             Self::Commit => "whole commit".into(),
             Self::File(file) => format!("whole file: {file}"),
             Self::Line { file, line } => format!("line: {file}:{line}"),
+            Self::Range { file, start, end } => format!("line range: {file}:{start}-{end}"),
         }
     }
 }
@@ -72,6 +82,7 @@ pub struct ReviewComment {
     pub scope: ReviewScope,
     pub diff_index: usize,
     pub body: String,
+    pub context: Vec<String>,
     pub thread: Vec<ReviewThreadMessage>,
 }
 
@@ -80,6 +91,7 @@ struct CommentAnchor {
     commit: String,
     scope: ReviewScope,
     diff_index: usize,
+    context: Vec<String>,
 }
 
 pub struct App {
@@ -100,6 +112,7 @@ pub struct App {
     pub diff_scroll: usize,
     pub diff_comment_selected: Option<usize>,
     pub diff_thread_selected: Option<usize>,
+    pub range_start: Option<usize>,
     pub diff_jump_direction: Option<isize>,
     pub comments: Vec<ReviewComment>,
     pub comment_buffer: String,
@@ -149,6 +162,7 @@ impl App {
             diff_scroll: 0,
             diff_comment_selected: None,
             diff_thread_selected: None,
+            range_start: None,
             diff_jump_direction: None,
             comments: Vec::new(),
             comment_buffer: String::new(),
@@ -582,6 +596,10 @@ impl App {
     }
 
     pub fn start_comment(&mut self) {
+        if let Some(range_start) = self.range_start.take() {
+            self.start_range_comment(range_start);
+            return;
+        }
         let Some((file, line)) = diff_location(&self.diff, self.diff_scroll) else {
             self.message = "Select an added, removed, or context line".into();
             return;
@@ -593,6 +611,7 @@ impl App {
             commit,
             scope: ReviewScope::Line { file, line },
             diff_index: self.diff_scroll,
+            context: review_context(&self.diff, self.diff_scroll),
         });
         self.comment_buffer.clear();
         self.input_mode = InputMode::Comment;
@@ -610,6 +629,7 @@ impl App {
             commit,
             scope: ReviewScope::File(file),
             diff_index,
+            context: Vec::new(),
         });
         self.diff_scroll = diff_index;
         self.comment_buffer.clear();
@@ -625,8 +645,78 @@ impl App {
             commit,
             scope: ReviewScope::Commit,
             diff_index,
+            context: Vec::new(),
         });
         self.diff_scroll = diff_index;
+        self.comment_buffer.clear();
+        self.input_mode = InputMode::Comment;
+    }
+
+    pub fn toggle_range_selection(&mut self) {
+        if self.range_start.take().is_some() {
+            self.message = "Range selection cancelled".into();
+            return;
+        }
+        if diff_location(&self.diff, self.diff_scroll).is_none() {
+            self.message = "Select a diff content line first".into();
+            return;
+        }
+        self.range_start = Some(self.diff_scroll);
+        self.diff_comment_selected = None;
+        self.diff_thread_selected = None;
+        self.message = "Range selection: move with j/k, then press a".into();
+    }
+
+    pub fn cancel_range_selection(&mut self) -> bool {
+        if self.range_start.take().is_some() {
+            self.message = "Range selection cancelled".into();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn range_contains(&self, index: usize) -> bool {
+        self.range_start.is_some_and(|start| {
+            let lower = start.min(self.diff_scroll);
+            let upper = start.max(self.diff_scroll);
+            (lower..=upper).contains(&index)
+        })
+    }
+
+    fn start_range_comment(&mut self, range_start: usize) {
+        let Some((start_file, start_line)) = diff_location(&self.diff, range_start) else {
+            self.message = "Invalid range start".into();
+            return;
+        };
+        let Some((end_file, end_line)) = diff_location(&self.diff, self.diff_scroll) else {
+            self.message = "Select a diff content line".into();
+            return;
+        };
+        if start_file != end_file {
+            self.message = "A review range cannot cross files".into();
+            return;
+        }
+        let Some(commit) = self.diff_oid.clone() else {
+            return;
+        };
+        let (start, end) = if start_line <= end_line {
+            (start_line, end_line)
+        } else {
+            (end_line, start_line)
+        };
+        let diff_index = range_start.max(self.diff_scroll);
+        self.diff_scroll = diff_index;
+        self.comment_anchor = Some(CommentAnchor {
+            commit,
+            scope: ReviewScope::Range {
+                file: start_file,
+                start,
+                end,
+            },
+            diff_index,
+            context: review_context(&self.diff, diff_index),
+        });
         self.comment_buffer.clear();
         self.input_mode = InputMode::Comment;
     }
@@ -687,6 +777,7 @@ impl App {
             scope: anchor.scope,
             diff_index: anchor.diff_index,
             body,
+            context: anchor.context,
             thread: Vec::new(),
         });
         self.diff_comment_selected = Some(comment_index);
@@ -1242,6 +1333,23 @@ fn commit_comment_anchor(diff: &[String]) -> usize {
         .unwrap_or_else(|| diff.len().saturating_sub(1))
 }
 
+fn review_context(diff: &[String], index: usize) -> Vec<String> {
+    if diff.is_empty() {
+        return Vec::new();
+    }
+    let index = index.min(diff.len() - 1);
+    let hunk_start = (0..=index)
+        .rev()
+        .find(|&cursor| diff[cursor].starts_with("@@"))
+        .unwrap_or(index.saturating_sub(8));
+    let hunk_end = ((index + 1)..diff.len())
+        .find(|&cursor| diff[cursor].starts_with("@@") || diff[cursor].starts_with("diff --git "))
+        .unwrap_or(diff.len());
+    let start = hunk_start.max(index.saturating_sub(8));
+    let end = hunk_end.min(index.saturating_add(9)).max(start + 1);
+    diff[start..end].to_vec()
+}
+
 fn find_wrapped(
     length: usize,
     current: usize,
@@ -1286,6 +1394,14 @@ fn format_review_request(comments: &[ReviewComment]) -> String {
             comment.scope.prompt_location(),
             comment.body
         ));
+        if !comment.context.is_empty() {
+            prompt.push_str("   Relevant diff context:\n```diff\n");
+            for line in &comment.context {
+                prompt.push_str(line);
+                prompt.push('\n');
+            }
+            prompt.push_str("```\n");
+        }
         for message in &comment.thread {
             let author = match &message.role {
                 ReviewThreadRole::Human => "Human follow-up".to_string(),
@@ -1406,6 +1522,7 @@ mod tests {
             },
             diff_index: 0,
             body: "Please simplify".into(),
+            context: Vec::new(),
             thread: Vec::new(),
         }];
 
@@ -1441,6 +1558,7 @@ mod tests {
             },
             diff_index: 0,
             body: "Please simplify".into(),
+            context: Vec::new(),
             thread: vec![ReviewThreadMessage {
                 role: ReviewThreadRole::Agent("codex:session-1".into()),
                 body: "Implemented the simpler version.".into(),
@@ -1544,6 +1662,7 @@ mod tests {
                 },
                 diff_index: 5,
                 body: "Please simplify".into(),
+                context: review_context(&app.diff, 5),
                 thread: Vec::new(),
             }]
         );
@@ -1597,6 +1716,42 @@ mod tests {
     }
 
     #[test]
+    fn range_comment_records_lines_and_bounded_diff_context() {
+        let mut app = App::new();
+        app.diff_oid = Some("abc123".into());
+        app.diff = vec![
+            "diff --git a/src/main.rs b/src/main.rs".into(),
+            "--- a/src/main.rs".into(),
+            "+++ b/src/main.rs".into(),
+            "@@ -10,3 +10,3 @@".into(),
+            " context".into(),
+            "-old".into(),
+            "+new".into(),
+            " tail".into(),
+        ];
+        app.diff_scroll = 4;
+        app.toggle_range_selection();
+        app.move_diff(2);
+        app.start_comment();
+        app.comment_buffer = "Keep these lines consistent".into();
+        app.submit_comment();
+
+        assert_eq!(
+            app.comments[0].scope,
+            ReviewScope::Range {
+                file: "src/main.rs".into(),
+                start: 10,
+                end: 11,
+            }
+        );
+        assert!(app.comments[0].context[0].starts_with("@@"));
+        let prompt = format_review_request(&app.comments);
+        assert!(prompt.contains("Scope: line range: src/main.rs:10-11"));
+        assert!(prompt.contains("Relevant diff context:"));
+        assert!(prompt.contains("-old\n+new"));
+    }
+
+    #[test]
     fn comments_can_be_edited_and_deleted() {
         let mut app = App::new();
         app.comments.push(ReviewComment {
@@ -1607,6 +1762,7 @@ mod tests {
             },
             diff_index: 5,
             body: "Old body".into(),
+            context: Vec::new(),
             thread: Vec::new(),
         });
 
@@ -1639,6 +1795,7 @@ mod tests {
             },
             diff_index: 3,
             body: "Handle this error".into(),
+            context: Vec::new(),
             thread: Vec::new(),
         });
         app.request_send_review();
@@ -1663,6 +1820,7 @@ mod tests {
                 },
                 diff_index: 3,
                 body: "First comment".into(),
+                context: Vec::new(),
                 thread: Vec::new(),
             },
             ReviewComment {
@@ -1673,6 +1831,7 @@ mod tests {
                 },
                 diff_index: 7,
                 body: "Second comment".into(),
+                context: Vec::new(),
                 thread: Vec::new(),
             },
         ];
@@ -1698,6 +1857,7 @@ mod tests {
             },
             diff_index: 3,
             body: "Delivered".into(),
+            context: Vec::new(),
             thread: Vec::new(),
         };
         let remaining = ReviewComment {
