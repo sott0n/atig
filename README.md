@@ -131,7 +131,9 @@ Press `Enter` on an added, removed, or context line to open the surrounding
 source file. Added and context lines use the post-change file; removed lines
 use the pre-change file. This also works for commit, working-tree, and staged
 diffs. `j`/`k`, page movement, `gg`, and `G` use the same Vim-style navigation
-as the diff. Press `b`, `Esc`, or `q` to return to the same diff position.
+as the diff. Changed lines have a green `+` or red `-` gutter marker; use `]c`
+and `[c` to move between changes in the current file. Press `b`, `Esc`, or `q`
+to return to the same diff position.
 
 When the selected Agent Intent includes a Reading Trail, the Context View
 shows why each related location matters. Use `]r` and `[r` to follow the trail

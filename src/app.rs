@@ -203,6 +203,7 @@ pub struct App {
     pub context_lines: Vec<String>,
     pub context_cursor: usize,
     pub context_version: String,
+    context_changed_lines: Vec<usize>,
     context_side: git::DiffSide,
     context_back_stack: Vec<ContextLocation>,
     context_forward_stack: Vec<ContextLocation>,
@@ -272,6 +273,7 @@ impl App {
             context_lines: Vec::new(),
             context_cursor: 0,
             context_version: String::new(),
+            context_changed_lines: Vec::new(),
             context_side: git::DiffSide::New,
             context_back_stack: Vec::new(),
             context_forward_stack: Vec::new(),
@@ -1134,6 +1136,7 @@ impl App {
                 self.context_lines = file.lines;
                 self.context_version = file.version;
                 self.context_side = side;
+                self.context_changed_lines = diff_changed_lines(&self.diff, path, side);
                 true
             }
             Err(error) => {
@@ -1228,6 +1231,42 @@ impl App {
             self.context_forward_stack.clear();
             self.message = format!("Read: {}", point.reason);
         }
+    }
+
+    pub fn complete_context_change_jump(&mut self) {
+        let Some(direction) = self.context_jump_direction.take() else {
+            return;
+        };
+        let current = self.context_cursor + 1;
+        let destination = if direction > 0 {
+            self.context_changed_lines
+                .iter()
+                .copied()
+                .find(|line| *line > current)
+        } else {
+            self.context_changed_lines
+                .iter()
+                .rev()
+                .copied()
+                .find(|line| *line < current)
+        };
+        if let Some(line) = destination {
+            self.context_cursor = line.saturating_sub(1);
+            self.message = format!("Change at {}:{line}", self.context_path);
+        } else {
+            self.message = if direction > 0 {
+                "No next change in this file".into()
+            } else {
+                "No previous change in this file".into()
+            };
+        }
+    }
+
+    pub fn context_change_side(&self, line: usize) -> Option<git::DiffSide> {
+        self.context_changed_lines
+            .binary_search(&line)
+            .is_ok()
+            .then_some(self.context_side)
     }
 
     fn current_context_location(&self) -> Option<ContextLocation> {
@@ -2054,6 +2093,58 @@ fn diff_context_location(diff: &[String], cursor: usize) -> Option<(String, usiz
     None
 }
 
+fn diff_changed_lines(diff: &[String], path: &str, side: git::DiffSide) -> Vec<usize> {
+    let mut old_file = None;
+    let mut new_file = None;
+    let mut old_line = 0usize;
+    let mut new_line = 0usize;
+    let mut in_hunk = false;
+    let mut changed = Vec::new();
+
+    for text in diff {
+        if text.starts_with("diff --git ") {
+            old_file = None;
+            new_file = None;
+            in_hunk = false;
+            continue;
+        }
+        if let Some(file) = text.strip_prefix("--- a/") {
+            old_file = Some(file);
+            continue;
+        }
+        if let Some(file) = text.strip_prefix("+++ b/") {
+            new_file = Some(file);
+            continue;
+        }
+        if let Some((old, new)) = parse_hunk_start(text) {
+            old_line = old;
+            new_line = new;
+            in_hunk = true;
+            continue;
+        }
+        if !in_hunk || text.starts_with("\\ No newline") {
+            continue;
+        }
+
+        if text.starts_with('+') {
+            if side == git::DiffSide::New && new_file == Some(path) {
+                changed.push(new_line);
+            }
+            new_line += 1;
+        } else if text.starts_with('-') {
+            if side == git::DiffSide::Old && old_file == Some(path) {
+                changed.push(old_line);
+            }
+            old_line += 1;
+        } else if text.starts_with(' ') {
+            old_line += 1;
+            new_line += 1;
+        }
+    }
+
+    changed
+}
+
 fn diff_file_anchor(diff: &[String], cursor: usize) -> Option<(String, usize)> {
     let anchor = (0..=cursor.min(diff.len().saturating_sub(1)))
         .rev()
@@ -2424,6 +2515,14 @@ mod tests {
             diff_context_location(&diff, 6),
             Some(("src/new.rs".into(), 21, git::DiffSide::New))
         );
+        assert_eq!(
+            diff_changed_lines(&diff, "src/old.rs", git::DiffSide::Old),
+            [10]
+        );
+        assert_eq!(
+            diff_changed_lines(&diff, "src/new.rs", git::DiffSide::New),
+            [20]
+        );
     }
 
     #[test]
@@ -2441,6 +2540,23 @@ mod tests {
         assert_eq!(app.context_cursor, 2);
         app.close_context();
         assert_eq!(app.view, View::Diff);
+    }
+
+    #[test]
+    fn context_change_navigation_moves_between_changed_lines() {
+        let mut app = App::new();
+        app.context_path = "src/main.rs".into();
+        app.context_lines = (1..=20).map(|line| line.to_string()).collect();
+        app.context_changed_lines = vec![3, 8, 14];
+        app.context_cursor = 2;
+
+        app.begin_context_jump(1);
+        app.complete_context_change_jump();
+        assert_eq!(app.context_cursor, 7);
+
+        app.begin_context_jump(-1);
+        app.complete_context_change_jump();
+        assert_eq!(app.context_cursor, 2);
     }
 
     #[test]

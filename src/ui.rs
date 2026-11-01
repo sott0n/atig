@@ -136,6 +136,7 @@ fn draw_help(frame: &mut Frame, areas: &[ratatui::layout::Rect]) {
         "[c / ]c, { / }     previous / next change",
         "[i / ]i            previous / next Agent Intent",
         "[r / ]r            previous / next reading point",
+        "[c / ]c            previous / next changed line",
         "Ctrl-o / Ctrl-i    older / newer context location",
         "Q                 ask Agent about context line",
         ":goto <line>       jump to a diff line",
@@ -234,6 +235,7 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
             text,
             number_width,
             index == app.context_cursor,
+            app.context_change_side(index + 1),
             areas[0].width as usize,
         ));
         for (turn, thread) in app
@@ -278,7 +280,7 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
     };
     let left = app.delivery_message.clone().unwrap_or_else(|| {
         format!(
-            "{} · {} · line {position}/{} · Q ask · [r/]r trail · ^o/^i history · b diff",
+            "{} · {} · line {position}/{} · Q ask · [c/]c changes · [r/]r trail · ^o/^i history · b diff",
             app.context_path,
             app.context_version,
             app.context_lines.len()
@@ -379,9 +381,15 @@ fn source_line(
     text: &str,
     number_width: usize,
     selected: bool,
+    changed_side: Option<crate::git::DiffSide>,
     viewport_width: usize,
 ) -> Line<'static> {
-    let prefix = format!(" {number:>number_width$} │ ");
+    let marker = match changed_side {
+        Some(crate::git::DiffSide::New) => '+',
+        Some(crate::git::DiffSide::Old) => '-',
+        None => ' ',
+    };
+    let prefix = format!("{marker}{number:>number_width$} │ ");
     if selected {
         let mut line = Line::from(vec![
             Span::styled(
@@ -402,8 +410,13 @@ fn source_line(
         ));
         line
     } else {
+        let marker_color = match changed_side {
+            Some(crate::git::DiffSide::New) => Color::Green,
+            Some(crate::git::DiffSide::Old) => Color::Red,
+            None => Color::DarkGray,
+        };
         Line::from(vec![
-            Span::styled(prefix, Style::default().fg(Color::DarkGray)),
+            Span::styled(prefix, Style::default().fg(marker_color)),
             Span::raw(text.to_string()),
         ])
     }
@@ -1287,10 +1300,25 @@ mod tests {
 
     #[test]
     fn selected_source_line_includes_a_line_number_and_fills_the_viewport() {
-        let rendered = source_line(12, "let answer = 42;", 3, true, 40);
+        let rendered = source_line(12, "let answer = 42;", 3, true, None, 40);
 
         assert!(rendered.to_string().contains("  12 │ let answer = 42;"));
         assert_eq!(rendered.width(), 40);
+    }
+
+    #[test]
+    fn changed_source_line_has_a_colored_gutter_marker() {
+        let rendered = source_line(
+            12,
+            "let answer = 42;",
+            3,
+            false,
+            Some(crate::git::DiffSide::New),
+            40,
+        );
+
+        assert!(rendered.to_string().starts_with("+ 12 │"));
+        assert_eq!(rendered.spans[0].style.fg, Some(Color::Green));
     }
 
     #[test]

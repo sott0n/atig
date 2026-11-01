@@ -198,6 +198,11 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 {
                     app.complete_context_reading_jump()
                 }
+                (KeyCode::Char('c'), KeyModifiers::NONE)
+                    if app.context_jump_direction.is_some() =>
+                {
+                    app.complete_context_change_jump()
+                }
                 (KeyCode::Char('Q'), KeyModifiers::SHIFT) => app.start_understanding_question(),
                 (KeyCode::Char('s'), KeyModifiers::NONE) => app.open_sessions(),
                 (KeyCode::Char('?'), _) => app.open_help(),
