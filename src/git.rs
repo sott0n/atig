@@ -3,6 +3,7 @@ use std::{
     fs,
     hash::{DefaultHasher, Hash, Hasher},
     io::{BufRead, BufReader, Read},
+    path::{Component, Path},
     process::{Command, Stdio},
     sync::{
         Arc,
@@ -196,15 +197,24 @@ pub fn read_source_file(
     path: &str,
     side: DiffSide,
 ) -> Result<SourceFile, String> {
+    if !is_safe_repository_path(path) {
+        return Err("Context path must be a repository-relative file path".into());
+    }
     let (contents, version) = match context_object(source, path, side) {
         ContextObject::Worktree => {
-            let metadata = fs::metadata(path)
+            let root = repository_root()?;
+            let resolved = fs::canonicalize(root.join(path))
+                .map_err(|error| format!("Cannot read {path} from worktree: {error}"))?;
+            if !resolved.starts_with(&root) {
+                return Err(format!("Context path escapes the repository: {path}"));
+            }
+            let metadata = fs::metadata(&resolved)
                 .map_err(|error| format!("Cannot read {path} from worktree: {error}"))?;
             if metadata.len() > MAX_CONTEXT_FILE_BYTES {
                 return Err(format!("Context file is larger than 2 MiB: {path}"));
             }
             (
-                fs::read(path)
+                fs::read(resolved)
                     .map_err(|error| format!("Cannot read {path} from worktree: {error}"))?,
                 "WORKTREE".to_string(),
             )
@@ -230,6 +240,29 @@ pub fn read_source_file(
         lines: text.lines().map(str::to_owned).collect(),
         version,
     })
+}
+
+fn repository_root() -> Result<std::path::PathBuf, String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .map_err(|error| format!("Cannot locate repository root: {error}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    let root = String::from_utf8(output.stdout)
+        .map_err(|_| "Repository root is not valid UTF-8".to_string())?;
+    fs::canonicalize(root.trim())
+        .map_err(|error| format!("Cannot resolve repository root: {error}"))
+}
+
+pub fn is_safe_repository_path(path: &str) -> bool {
+    let path = Path::new(path);
+    !path.as_os_str().is_empty()
+        && !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -595,5 +628,13 @@ mod tests {
                 version: "1234567890ab".into(),
             }
         );
+    }
+
+    #[test]
+    fn rejects_context_paths_that_can_escape_the_repository() {
+        assert!(is_safe_repository_path("src/main.rs"));
+        assert!(!is_safe_repository_path("../outside"));
+        assert!(!is_safe_repository_path("/etc/passwd"));
+        assert!(!is_safe_repository_path("src/../outside"));
     }
 }

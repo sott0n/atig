@@ -134,6 +134,7 @@ fn draw_help(frame: &mut Frame, areas: &[ratatui::layout::Rect]) {
         "[f / ]f, Tab       previous / next file",
         "[c / ]c, { / }     previous / next change",
         "[i / ]i            previous / next Agent Intent",
+        "[r / ]r            previous / next reading point",
         ":goto <line>       jump to a diff line",
         "/, n, N           search / next / previous",
         "r                 reload",
@@ -167,27 +168,60 @@ fn draw_help(frame: &mut Frame, areas: &[ratatui::layout::Rect]) {
 
 fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
     let height = areas[0].height as usize;
+    let trail_header = if let Some(point) = app.current_reading_point() {
+        let position = app.context_reading_index.unwrap_or(0) + 1;
+        Some(Line::from(vec![
+            Span::styled(" ◆ ", Style::default().fg(Color::Magenta)),
+            Span::styled(
+                format!("READ {position}/{}", app.context_reading_path.len()),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" · {} · {}", reading_point_location(point), point.reason),
+                Style::default().fg(Color::White),
+            ),
+        ]))
+    } else if !app.context_reading_path.is_empty() {
+        Some(Line::from(vec![
+            Span::styled(" ◆ ", Style::default().fg(Color::Magenta)),
+            Span::styled(
+                format!(
+                    "READING TRAIL · {} locations · ]r start",
+                    app.context_reading_path.len()
+                ),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]))
+    } else {
+        None
+    };
+    let source_height = height.saturating_sub(usize::from(trail_header.is_some()));
     let start = app
         .context_cursor
-        .saturating_sub((height / 4).max(1))
-        .min(app.context_lines.len().saturating_sub(height));
+        .saturating_sub((source_height / 4).max(1))
+        .min(app.context_lines.len().saturating_sub(source_height));
     let number_width = app.context_lines.len().max(1).to_string().len();
-    let lines = app
-        .context_lines
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(height)
-        .map(|(index, text)| {
-            source_line(
-                index + 1,
-                text,
-                number_width,
-                index == app.context_cursor,
-                areas[0].width as usize,
-            )
-        })
-        .collect::<Vec<_>>();
+    let mut lines = trail_header.into_iter().collect::<Vec<_>>();
+    lines.extend(
+        app.context_lines
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(source_height)
+            .map(|(index, text)| {
+                source_line(
+                    index + 1,
+                    text,
+                    number_width,
+                    index == app.context_cursor,
+                    areas[0].width as usize,
+                )
+            }),
+    );
     frame.render_widget(Paragraph::new(Text::from(lines)), areas[0]);
 
     let position = if app.context_lines.is_empty() {
@@ -196,7 +230,7 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
         app.context_cursor + 1
     };
     let left = format!(
-        "{} · {} · line {position}/{} · b back",
+        "{} · {} · line {position}/{} · [r/]r trail · b back",
         app.context_path,
         app.context_version,
         app.context_lines.len()
@@ -216,6 +250,14 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
         ),
         areas[1],
     );
+}
+
+fn reading_point_location(point: &crate::app::AgentReadingPoint) -> String {
+    if point.symbol.is_empty() {
+        format!("{}:{}", point.file, point.line)
+    } else {
+        format!("{} · {}:{}", point.symbol, point.file, point.line)
+    }
 }
 
 fn source_line(
@@ -723,6 +765,27 @@ fn agent_intent_box(intent: &AgentIntent, width: usize) -> Vec<Line<'static>> {
             Span::styled(chunk, Style::default().fg(Color::White)),
         ]));
     }
+    for (index, point) in intent.reading_path.iter().enumerate() {
+        lines.push(Line::from(vec![
+            Span::styled("  ├ ", Style::default().fg(Color::Magenta)),
+            Span::styled(
+                format!("READ {}", index + 1),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" · {}", reading_point_location(point)),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+        for chunk in wrap_comment_body(&point.reason, content_width) {
+            lines.push(Line::from(vec![
+                Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
+                Span::styled(chunk, Style::default().fg(Color::White)),
+            ]));
+        }
+    }
     lines
 }
 
@@ -1215,6 +1278,12 @@ mod tests {
             line: 12,
             side: crate::app::AgentIntentSide::New,
             intent: "Keep parsing separate from rendering".into(),
+            reading_path: vec![crate::app::AgentReadingPoint {
+                file: "src/parser.rs".into(),
+                line: 8,
+                symbol: "parse".into(),
+                reason: "Follow the parsing entry point".into(),
+            }],
         };
         let rendered = agent_intent_box(&intent, 60);
         let text = rendered
@@ -1225,6 +1294,8 @@ mod tests {
 
         assert!(text.contains("◆ AGENT INTENT · src/main.rs:12"));
         assert!(text.contains("Keep parsing separate from rendering"));
+        assert!(text.contains("READ 1 · parse · src/parser.rs:8"));
+        assert!(text.contains("Follow the parsing entry point"));
         assert_eq!(
             visible_agent_response(
                 "Implemented.\n<atig-intents>\n[{\"file\":\"src/main.rs\"}]\n</atig-intents>"

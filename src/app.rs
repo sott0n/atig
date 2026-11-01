@@ -57,6 +57,17 @@ pub struct AgentIntent {
     #[serde(default)]
     pub side: AgentIntentSide,
     pub intent: String,
+    #[serde(default)]
+    pub reading_path: Vec<AgentReadingPoint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AgentReadingPoint {
+    pub file: String,
+    pub line: usize,
+    #[serde(default)]
+    pub symbol: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Deserialize)]
@@ -161,6 +172,9 @@ pub struct App {
     pub context_lines: Vec<String>,
     pub context_cursor: usize,
     pub context_version: String,
+    pub context_reading_path: Vec<AgentReadingPoint>,
+    pub context_reading_index: Option<usize>,
+    pub context_jump_direction: Option<isize>,
     pub comments: Vec<ReviewComment>,
     pub comment_buffer: String,
     pub comment_selected: usize,
@@ -221,6 +235,9 @@ impl App {
             context_lines: Vec::new(),
             context_cursor: 0,
             context_version: String::new(),
+            context_reading_path: Vec::new(),
+            context_reading_index: None,
+            context_jump_direction: None,
             comments: Vec::new(),
             comment_buffer: String::new(),
             comment_selected: 0,
@@ -1036,32 +1053,58 @@ impl App {
             self.message = "Select a code line to open its context".into();
             return;
         };
+        let reading_path = self
+            .agent_intent_anchors()
+            .remove(&self.diff_scroll)
+            .unwrap_or_default()
+            .into_iter()
+            .flat_map(|intent| intent.reading_path)
+            .fold(Vec::new(), |mut points, point| {
+                if !points.contains(&point) {
+                    points.push(point);
+                }
+                points
+            });
+        if self.load_context_file(&path, line, side) {
+            self.context_reading_path = reading_path;
+            self.context_reading_index = None;
+            self.context_jump_direction = None;
+            self.view = View::Context;
+            self.pending_g = false;
+        }
+    }
+
+    fn load_context_file(&mut self, path: &str, line: usize, side: git::DiffSide) -> bool {
         let Some(source) = self.diff_source.as_ref() else {
             self.message = "No diff source available".into();
-            return;
+            return false;
         };
-        match git::read_source_file(source, &path, side) {
+        match git::read_source_file(source, path, side) {
             Ok(file) => {
-                self.context_path = path;
+                self.context_path = path.to_string();
                 self.context_cursor = line
                     .saturating_sub(1)
                     .min(file.lines.len().saturating_sub(1));
                 self.context_lines = file.lines;
                 self.context_version = file.version;
-                self.view = View::Context;
-                self.pending_g = false;
+                true
             }
-            Err(error) => self.message = error,
+            Err(error) => {
+                self.message = error;
+                false
+            }
         }
     }
 
     pub fn close_context(&mut self) {
         self.view = View::Diff;
         self.pending_g = false;
+        self.context_jump_direction = None;
     }
 
     pub fn move_context(&mut self, amount: isize) {
         self.pending_g = false;
+        self.context_jump_direction = None;
         if amount < 0 {
             self.context_cursor = self.context_cursor.saturating_sub(amount.unsigned_abs());
         } else {
@@ -1073,6 +1116,7 @@ impl App {
     }
 
     pub fn handle_context_g(&mut self) {
+        self.context_jump_direction = None;
         if self.pending_g {
             self.context_cursor = 0;
             self.pending_g = false;
@@ -1084,6 +1128,48 @@ impl App {
     pub fn select_context_end(&mut self) {
         self.context_cursor = self.context_lines.len().saturating_sub(1);
         self.pending_g = false;
+        self.context_jump_direction = None;
+    }
+
+    pub fn begin_context_jump(&mut self, direction: isize) {
+        self.pending_g = false;
+        self.context_jump_direction = Some(direction.signum());
+    }
+
+    pub fn complete_context_reading_jump(&mut self) {
+        let Some(direction) = self.context_jump_direction.take() else {
+            return;
+        };
+        if self.context_reading_path.is_empty() {
+            self.message = "No reading trail for this change".into();
+            return;
+        }
+        let destination = match (self.context_reading_index, direction > 0) {
+            (None, true) => Some(0),
+            (None, false) => Some(self.context_reading_path.len() - 1),
+            (Some(index), true) => index
+                .checked_add(1)
+                .filter(|next| *next < self.context_reading_path.len()),
+            (Some(index), false) => index.checked_sub(1),
+        };
+        let Some(destination) = destination else {
+            self.message = if direction > 0 {
+                "No next reading point".into()
+            } else {
+                "No previous reading point".into()
+            };
+            return;
+        };
+        let point = self.context_reading_path[destination].clone();
+        if self.load_context_file(&point.file, point.line, git::DiffSide::New) {
+            self.context_reading_index = Some(destination);
+            self.message = format!("Read: {}", point.reason);
+        }
+    }
+
+    pub fn current_reading_point(&self) -> Option<&AgentReadingPoint> {
+        self.context_reading_index
+            .and_then(|index| self.context_reading_path.get(index))
     }
 
     pub fn editing_comment_index(&self) -> Option<usize> {
@@ -1809,7 +1895,14 @@ fn parse_agent_intents(body: &str) -> Vec<AgentIntent> {
     let Some((manifest, _)) = rest.split_once(INTENTS_END) else {
         return Vec::new();
     };
-    serde_json::from_str(manifest.trim()).unwrap_or_default()
+    let mut intents: Vec<AgentIntent> = serde_json::from_str(manifest.trim()).unwrap_or_default();
+    for intent in &mut intents {
+        intent
+            .reading_path
+            .retain(|point| point.line > 0 && git::is_safe_repository_path(&point.file));
+        intent.reading_path.truncate(5);
+    }
+    intents
 }
 
 fn scope_diff_index(diff: &[String], scope: &ReviewScope) -> Option<usize> {
@@ -1867,7 +1960,7 @@ fn parse_hunk_start(line: &str) -> Option<(usize, usize)> {
 
 fn format_review_request(comments: &[ReviewComment]) -> String {
     let mut prompt = String::from(
-        "Please address the following code review comments. Use a sub-agent for the implementation when your environment supports it. Inspect the current working tree before editing, make only the requested changes, and run relevant tests. Do not commit or push.\n\nAfter your normal response, append a change-intent manifest in exactly this form, without a Markdown code fence:\n<atig-intents>\n[{\"file\":\"relative/path.rs\",\"line\":123,\"side\":\"new\",\"intent\":\"Why this logical change was made\"}]\n</atig-intents>\nUse repository-relative paths. Add one concise entry per logical change, anchored to its first added or modified post-change line with side \"new\". For a pure deletion, use the first deleted pre-change line with side \"old\". Use [] when you made no code changes.\n\n",
+        "Please address the following code review comments. Use a sub-agent for the implementation when your environment supports it. Inspect the current working tree before editing, make only the requested changes, and run relevant tests. Do not commit or push.\n\nAfter your normal response, append a change-intent manifest in exactly this form, without a Markdown code fence:\n<atig-intents>\n[{\"file\":\"relative/path.rs\",\"line\":123,\"side\":\"new\",\"intent\":\"Why this logical change was made\",\"reading_path\":[{\"file\":\"relative/related.rs\",\"line\":45,\"symbol\":\"Related::method\",\"reason\":\"Why this code helps explain the change\"}]}]\n</atig-intents>\nUse repository-relative paths. Add one concise entry per logical change, anchored to its first added or modified post-change line with side \"new\". For a pure deletion, use the first deleted pre-change line with side \"old\". For each intent, add up to five post-change reading_path locations in the order a human should read them to understand the change. Include only useful locations, use an empty symbol when unavailable, and use [] when no additional code is needed. Use [] for the entire manifest when you made no code changes.\n\n",
     );
     for (index, comment) in comments.iter().enumerate() {
         prompt.push_str(&format!(
@@ -2275,6 +2368,8 @@ mod tests {
         assert!(prompt.contains("Scope: line range: src/main.rs:10-11"));
         assert!(prompt.contains("Relevant diff context:"));
         assert!(prompt.contains("-old\n+new"));
+        assert!(prompt.contains("\"reading_path\""));
+        assert!(prompt.contains("order a human should read them"));
     }
 
     #[test]
@@ -2437,7 +2532,7 @@ mod tests {
             context: Vec::new(),
             thread: vec![ReviewThreadMessage {
                 role: ReviewThreadRole::Agent("codex:session-1".into()),
-                body: "Done.\n<atig-intents>\n[{\"file\":\"src/main.rs\",\"line\":1,\"side\":\"old\",\"intent\":\"Remove the obsolete behavior\"},{\"file\":\"src/main.rs\",\"line\":1,\"side\":\"new\",\"intent\":\"Use the new behavior\"}]\n</atig-intents>".into(),
+                body: "Done.\n<atig-intents>\n[{\"file\":\"src/main.rs\",\"line\":1,\"side\":\"old\",\"intent\":\"Remove the obsolete behavior\"},{\"file\":\"src/main.rs\",\"line\":1,\"side\":\"new\",\"intent\":\"Use the new behavior\",\"reading_path\":[{\"file\":\"Cargo.toml\",\"line\":1,\"symbol\":\"package\",\"reason\":\"Understand the crate context\"}]}]\n</atig-intents>".into(),
             }],
         };
         app.comments = vec![comment.clone(), comment];
@@ -2450,6 +2545,7 @@ mod tests {
                 line: 1,
                 side: AgentIntentSide::Old,
                 intent: "Remove the obsolete behavior".into(),
+                reading_path: Vec::new(),
             }])
         );
         assert_eq!(
@@ -2459,6 +2555,12 @@ mod tests {
                 line: 1,
                 side: AgentIntentSide::New,
                 intent: "Use the new behavior".into(),
+                reading_path: vec![AgentReadingPoint {
+                    file: "Cargo.toml".into(),
+                    line: 1,
+                    symbol: "package".into(),
+                    reason: "Understand the crate context".into(),
+                }],
             }])
         );
 
@@ -2474,6 +2576,17 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].intent_count, 2);
 
+        app.diff_source = Some(git::DiffSource::Worktree);
+        app.diff_scroll = 5;
+        app.open_context();
+        assert_eq!(app.view, View::Context);
+        assert_eq!(app.context_reading_path.len(), 1);
+        app.begin_context_jump(1);
+        app.complete_context_reading_jump();
+        assert_eq!(app.context_path, "Cargo.toml");
+        assert_eq!(app.context_reading_index, Some(0));
+        assert_eq!(app.message, "Read: Understand the crate context");
+
         app.toggle_agent_intents();
         assert!(!app.show_agent_intents);
         assert_eq!(app.message, "Agent Intents hidden");
@@ -2485,6 +2598,25 @@ mod tests {
 
         assert!(parse_agent_intents(response).is_empty());
         assert_eq!(visible_agent_response(response), "Done.");
+    }
+
+    #[test]
+    fn reading_trails_reject_unsafe_paths_and_keep_at_most_five_points() {
+        let response = r#"Done.
+<atig-intents>
+[{"file":"src/main.rs","line":1,"intent":"Explain it","reading_path":[{"file":"../secret","line":1,"reason":"unsafe"},{"file":"src/1.rs","line":1,"reason":"one"},{"file":"src/2.rs","line":2,"reason":"two"},{"file":"src/3.rs","line":3,"reason":"three"},{"file":"src/4.rs","line":4,"reason":"four"},{"file":"src/5.rs","line":5,"reason":"five"},{"file":"src/6.rs","line":6,"reason":"six"}]}]
+</atig-intents>"#;
+
+        let intents = parse_agent_intents(response);
+
+        assert_eq!(intents[0].reading_path.len(), 5);
+        assert!(
+            intents[0]
+                .reading_path
+                .iter()
+                .all(|point| !point.file.contains(".."))
+        );
+        assert_eq!(intents[0].reading_path[4].file, "src/5.rs");
     }
 
     #[test]

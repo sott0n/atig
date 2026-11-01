@@ -174,9 +174,20 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 (KeyCode::Home, _) => {
                     app.context_cursor = 0;
                     app.pending_g = false;
+                    app.context_jump_direction = None;
+                }
+                (KeyCode::Char(']'), KeyModifiers::NONE) => app.begin_context_jump(1),
+                (KeyCode::Char('['), KeyModifiers::NONE) => app.begin_context_jump(-1),
+                (KeyCode::Char('r'), KeyModifiers::NONE)
+                    if app.context_jump_direction.is_some() =>
+                {
+                    app.complete_context_reading_jump()
                 }
                 (KeyCode::Char('?'), _) => app.open_help(),
-                _ => app.pending_g = false,
+                _ => {
+                    app.pending_g = false;
+                    app.context_jump_direction = None;
+                }
             }
             continue;
         }

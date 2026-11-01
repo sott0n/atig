@@ -133,6 +133,12 @@ use the pre-change file. This also works for commit, working-tree, and staged
 diffs. `j`/`k`, page movement, `gg`, and `G` use the same Vim-style navigation
 as the diff. Press `b`, `Esc`, or `q` to return to the same diff position.
 
+When the selected Agent Intent includes a Reading Trail, the Context View
+shows why each related location matters. Use `]r` and `[r` to follow the trail
+forward and backward. atig opens only safe repository-relative text files;
+Reading Trail paths cannot escape the repository through `..`, absolute paths,
+or symbolic links.
+
 Context files are read-only. atig refuses files larger than 2 MiB and files
 that are not UTF-8 text.
 
@@ -213,6 +219,9 @@ atig only displays intentions explicitly returned by the Agent and does not
 guess when the response omits the intent manifest or returns a malformed one.
 Use `]i`/`[i` to jump between reported intentions, `i` to show or hide their
 inline cards, and `t` to see the Intent count for each changed file.
+An intent may also include up to five ordered Reading Trail locations. Press
+`Enter` on its diff line, then use `]r`/`[r` in Context View to move through
+the related code and see why each location is relevant.
 Use `j`/`k` to select the Agent response, press `Enter` to write a follow-up,
 then press `S` on that thread to send the complete conversation context back
 to the selected Agent session.
