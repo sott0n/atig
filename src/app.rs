@@ -24,6 +24,7 @@ pub enum InputMode {
 pub enum View {
     History,
     Diff,
+    Context,
     Comments,
     Files,
     Help,
@@ -156,6 +157,10 @@ pub struct App {
     pub range_start: Option<usize>,
     pub diff_jump_direction: Option<isize>,
     pub show_agent_intents: bool,
+    pub context_path: String,
+    pub context_lines: Vec<String>,
+    pub context_cursor: usize,
+    pub context_version: String,
     pub comments: Vec<ReviewComment>,
     pub comment_buffer: String,
     pub comment_selected: usize,
@@ -212,6 +217,10 @@ impl App {
             range_start: None,
             diff_jump_direction: None,
             show_agent_intents: true,
+            context_path: String::new(),
+            context_lines: Vec::new(),
+            context_cursor: 0,
+            context_version: String::new(),
             comments: Vec::new(),
             comment_buffer: String::new(),
             comment_selected: 0,
@@ -481,7 +490,7 @@ impl App {
             View::Diff => find_wrapped(self.diff.len(), self.diff_scroll, direction, |index| {
                 self.diff[index].to_lowercase().contains(&query)
             }),
-            View::Comments | View::Files | View::Help | View::Sessions => None,
+            View::Context | View::Comments | View::Files | View::Help | View::Sessions => None,
         };
         match (self.view, destination) {
             (View::History, Some(index)) => self.selected = Some(index),
@@ -1012,6 +1021,69 @@ impl App {
         }
         self.comment_selected = index;
         self.edit_selected_comment();
+    }
+
+    pub fn activate_diff_selection(&mut self) {
+        if self.diff_comment_selected.is_some() {
+            self.edit_inline_comment();
+        } else {
+            self.open_context();
+        }
+    }
+
+    pub fn open_context(&mut self) {
+        let Some((path, line, side)) = diff_context_location(&self.diff, self.diff_scroll) else {
+            self.message = "Select a code line to open its context".into();
+            return;
+        };
+        let Some(source) = self.diff_source.as_ref() else {
+            self.message = "No diff source available".into();
+            return;
+        };
+        match git::read_source_file(source, &path, side) {
+            Ok(file) => {
+                self.context_path = path;
+                self.context_cursor = line
+                    .saturating_sub(1)
+                    .min(file.lines.len().saturating_sub(1));
+                self.context_lines = file.lines;
+                self.context_version = file.version;
+                self.view = View::Context;
+                self.pending_g = false;
+            }
+            Err(error) => self.message = error,
+        }
+    }
+
+    pub fn close_context(&mut self) {
+        self.view = View::Diff;
+        self.pending_g = false;
+    }
+
+    pub fn move_context(&mut self, amount: isize) {
+        self.pending_g = false;
+        if amount < 0 {
+            self.context_cursor = self.context_cursor.saturating_sub(amount.unsigned_abs());
+        } else {
+            self.context_cursor = self
+                .context_cursor
+                .saturating_add(amount as usize)
+                .min(self.context_lines.len().saturating_sub(1));
+        }
+    }
+
+    pub fn handle_context_g(&mut self) {
+        if self.pending_g {
+            self.context_cursor = 0;
+            self.pending_g = false;
+        } else {
+            self.pending_g = true;
+        }
+    }
+
+    pub fn select_context_end(&mut self) {
+        self.context_cursor = self.context_lines.len().saturating_sub(1);
+        self.pending_g = false;
     }
 
     pub fn editing_comment_index(&self) -> Option<usize> {
@@ -1589,14 +1661,29 @@ impl Drop for App {
 }
 
 fn diff_location(diff: &[String], cursor: usize) -> Option<(String, usize)> {
-    let mut file = None;
+    diff_context_location(diff, cursor).map(|(file, line, _)| (file, line))
+}
+
+fn diff_context_location(diff: &[String], cursor: usize) -> Option<(String, usize, git::DiffSide)> {
+    let mut old_file = None;
+    let mut new_file = None;
     let mut old_line = 0usize;
     let mut new_line = 0usize;
     let mut in_hunk = false;
 
     for (index, text) in diff.iter().enumerate().take(cursor.saturating_add(1)) {
+        if text.starts_with("diff --git ") {
+            old_file = None;
+            new_file = None;
+            in_hunk = false;
+            continue;
+        }
+        if let Some(path) = text.strip_prefix("--- a/") {
+            old_file = Some(path.to_string());
+            continue;
+        }
         if let Some(path) = text.strip_prefix("+++ b/") {
-            file = Some(path.to_string());
+            new_file = Some(path.to_string());
             continue;
         }
         if let Some((old, new)) = parse_hunk_start(text) {
@@ -1609,25 +1696,29 @@ fn diff_location(diff: &[String], cursor: usize) -> Option<(String, usize)> {
             continue;
         }
 
-        let location = if text.starts_with('+') {
+        let (file, location, side) = if text.starts_with('+') {
             let line = new_line;
             new_line += 1;
-            line
+            (new_file.clone()?, line, git::DiffSide::New)
         } else if text.starts_with('-') {
             let line = old_line;
             old_line += 1;
-            line
+            (old_file.clone()?, line, git::DiffSide::Old)
         } else if text.starts_with(' ') {
             let line = new_line;
             old_line += 1;
             new_line += 1;
-            line
+            (
+                new_file.clone().or_else(|| old_file.clone())?,
+                line,
+                git::DiffSide::New,
+            )
         } else {
             continue;
         };
 
         if index == cursor {
-            return Some((file.clone()?, location));
+            return Some((file, location, side));
         }
     }
     None
@@ -1899,6 +1990,49 @@ mod tests {
 
         app.move_diff(-1);
         assert_eq!(app.diff_scroll, 0);
+    }
+
+    #[test]
+    fn diff_context_tracks_old_and_new_file_versions() {
+        let diff = vec![
+            "diff --git a/src/old.rs b/src/new.rs".into(),
+            "--- a/src/old.rs".into(),
+            "+++ b/src/new.rs".into(),
+            "@@ -10,2 +20,2 @@".into(),
+            "-old".into(),
+            "+new".into(),
+            " context".into(),
+        ];
+
+        assert_eq!(
+            diff_context_location(&diff, 4),
+            Some(("src/old.rs".into(), 10, git::DiffSide::Old))
+        );
+        assert_eq!(
+            diff_context_location(&diff, 5),
+            Some(("src/new.rs".into(), 20, git::DiffSide::New))
+        );
+        assert_eq!(
+            diff_context_location(&diff, 6),
+            Some(("src/new.rs".into(), 21, git::DiffSide::New))
+        );
+    }
+
+    #[test]
+    fn context_navigation_is_bounded_and_returns_to_diff() {
+        let mut app = App::new();
+        app.view = View::Context;
+        app.context_lines = vec!["one".into(), "two".into(), "three".into()];
+        app.context_cursor = 1;
+
+        app.move_context(10);
+        assert_eq!(app.context_cursor, 2);
+        app.move_context(-10);
+        assert_eq!(app.context_cursor, 0);
+        app.select_context_end();
+        assert_eq!(app.context_cursor, 2);
+        app.close_context();
+        assert_eq!(app.view, View::Diff);
     }
 
     #[test]

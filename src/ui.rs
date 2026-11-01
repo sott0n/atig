@@ -27,6 +27,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
         draw_diff(frame, app, &areas);
         return;
     }
+    if app.view == View::Context {
+        draw_context(frame, app, &areas);
+        return;
+    }
     if app.view == View::Comments {
         draw_comments(frame, app, &areas);
         return;
@@ -125,7 +129,7 @@ fn draw_help(frame: &mut Frame, areas: &[ratatui::layout::Rect]) {
         "Ctrl-f / Ctrl-b   full page down / up",
         "PgDn / PgUp       full page down / up",
         "J / K             move 10 lines",
-        "Enter             open / edit / reply",
+        "Enter             open code context / edit / reply",
         "Esc, q            back",
         "[f / ]f, Tab       previous / next file",
         "[c / ]c, { / }     previous / next change",
@@ -142,6 +146,7 @@ fn draw_help(frame: &mut Frame, areas: &[ratatui::layout::Rect]) {
         "S                 send review comments",
         "X                 view Agent changes",
         "i                 toggle Agent Intents",
+        "b                 back from code context",
         ":                 command",
         "?                 toggle this help",
     ]
@@ -158,6 +163,94 @@ fn draw_help(frame: &mut Frame, areas: &[ratatui::layout::Rect]) {
         ),
         areas[1],
     );
+}
+
+fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
+    let height = areas[0].height as usize;
+    let start = app
+        .context_cursor
+        .saturating_sub((height / 4).max(1))
+        .min(app.context_lines.len().saturating_sub(height));
+    let number_width = app.context_lines.len().max(1).to_string().len();
+    let lines = app
+        .context_lines
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(height)
+        .map(|(index, text)| {
+            source_line(
+                index + 1,
+                text,
+                number_width,
+                index == app.context_cursor,
+                areas[0].width as usize,
+            )
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(Text::from(lines)), areas[0]);
+
+    let position = if app.context_lines.is_empty() {
+        0
+    } else {
+        app.context_cursor + 1
+    };
+    let left = format!(
+        "{} · {} · line {position}/{} · b back",
+        app.context_path,
+        app.context_version,
+        app.context_lines.len()
+    );
+    let right = if app.context_lines.is_empty() {
+        "0%".to_string()
+    } else {
+        format!("{}%", (position * 100) / app.context_lines.len())
+    };
+    let gap = (areas[1].width as usize).saturating_sub(left.chars().count() + right.len());
+    frame.render_widget(
+        Paragraph::new(format!("{left}{}{right}", " ".repeat(gap))).style(
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        ),
+        areas[1],
+    );
+}
+
+fn source_line(
+    number: usize,
+    text: &str,
+    number_width: usize,
+    selected: bool,
+    viewport_width: usize,
+) -> Line<'static> {
+    let prefix = format!(" {number:>number_width$} │ ");
+    if selected {
+        let mut line = Line::from(vec![
+            Span::styled(
+                prefix,
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                text.to_string(),
+                Style::default().fg(Color::Black).bg(Color::Green),
+            ),
+        ]);
+        line.push_span(Span::styled(
+            " ".repeat(viewport_width.saturating_sub(line.width())),
+            Style::default().bg(Color::Green),
+        ));
+        line
+    } else {
+        Line::from(vec![
+            Span::styled(prefix, Style::default().fg(Color::DarkGray)),
+            Span::raw(text.to_string()),
+        ])
+    }
 }
 
 fn draw_files(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
@@ -543,7 +636,7 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
         )
     } else {
         format!(
-            "commit {oid} - line {position} of {} - {} comments{}{}",
+            "commit {oid} - line {position} of {} - Enter context - {} comments{}{}",
             app.diff.len(),
             app.comments.len(),
             if app.dispatching { " - sending" } else { "" },
@@ -1013,6 +1106,14 @@ mod tests {
 
         assert_eq!(rendered.style.bg, Some(Color::Green));
         assert_eq!(rendered.width(), 80);
+    }
+
+    #[test]
+    fn selected_source_line_includes_a_line_number_and_fills_the_viewport() {
+        let rendered = source_line(12, "let answer = 42;", 3, true, 40);
+
+        assert!(rendered.to_string().contains("  12 │ let answer = 42;"));
+        assert_eq!(rendered.width(), 40);
     }
 
     #[test]

@@ -16,6 +16,7 @@ const RECORD_SEPARATOR: char = '\u{1e}';
 const FIELD_SEPARATOR: char = '\u{1f}';
 const LOG_FORMAT: &str = "%x1e%H%x1f%h%x1f%P%x1f%ad%x1f%aN%x1f%D%x1f%s";
 const DATE_WIDTH: usize = 22;
+const MAX_CONTEXT_FILE_BYTES: u64 = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitLine {
@@ -131,6 +132,17 @@ pub enum DiffSource {
     Staged,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffSide {
+    Old,
+    New,
+}
+
+pub struct SourceFile {
+    pub lines: Vec<String>,
+    pub version: String,
+}
+
 pub type ChangeSnapshot = BTreeMap<String, u64>;
 
 pub fn change_snapshot() -> Result<ChangeSnapshot, String> {
@@ -177,6 +189,91 @@ impl DiffSource {
             Self::Staged => "STAGED".into(),
         }
     }
+}
+
+pub fn read_source_file(
+    source: &DiffSource,
+    path: &str,
+    side: DiffSide,
+) -> Result<SourceFile, String> {
+    let (contents, version) = match context_object(source, path, side) {
+        ContextObject::Worktree => {
+            let metadata = fs::metadata(path)
+                .map_err(|error| format!("Cannot read {path} from worktree: {error}"))?;
+            if metadata.len() > MAX_CONTEXT_FILE_BYTES {
+                return Err(format!("Context file is larger than 2 MiB: {path}"));
+            }
+            (
+                fs::read(path)
+                    .map_err(|error| format!("Cannot read {path} from worktree: {error}"))?,
+                "WORKTREE".to_string(),
+            )
+        }
+        ContextObject::Git { object, version } => {
+            let size = git_object_size(&object)?;
+            if size > MAX_CONTEXT_FILE_BYTES {
+                return Err(format!("Context file is larger than 2 MiB: {path}"));
+            }
+            let output = Command::new("git")
+                .args(["cat-file", "-p", &object])
+                .output()
+                .map_err(|error| format!("Cannot read {path} from {version}: {error}"))?;
+            if !output.status.success() {
+                return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+            }
+            (output.stdout, version)
+        }
+    };
+    let text = String::from_utf8(contents)
+        .map_err(|_| format!("Context file is not UTF-8 text: {path}"))?;
+    Ok(SourceFile {
+        lines: text.lines().map(str::to_owned).collect(),
+        version,
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ContextObject {
+    Worktree,
+    Git { object: String, version: String },
+}
+
+fn context_object(source: &DiffSource, path: &str, side: DiffSide) -> ContextObject {
+    match (source, side) {
+        (DiffSource::Worktree, DiffSide::New) => ContextObject::Worktree,
+        (DiffSource::Worktree, DiffSide::Old) | (DiffSource::Staged, DiffSide::New) => {
+            ContextObject::Git {
+                object: format!(":{path}"),
+                version: "INDEX".into(),
+            }
+        }
+        (DiffSource::Staged, DiffSide::Old) => ContextObject::Git {
+            object: format!("HEAD:{path}"),
+            version: "HEAD".into(),
+        },
+        (DiffSource::Commit(oid), DiffSide::New) => ContextObject::Git {
+            object: format!("{oid}:{path}"),
+            version: oid.chars().take(12).collect(),
+        },
+        (DiffSource::Commit(oid), DiffSide::Old) => ContextObject::Git {
+            object: format!("{oid}^:{path}"),
+            version: format!("{}^", oid.chars().take(12).collect::<String>()),
+        },
+    }
+}
+
+fn git_object_size(object: &str) -> Result<u64, String> {
+    let output = Command::new("git")
+        .args(["cat-file", "-s", object])
+        .output()
+        .map_err(|error| format!("Cannot inspect source file: {error}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .map_err(|_| "Git returned an invalid source file size".to_string())
 }
 
 #[derive(Clone)]
@@ -464,6 +561,39 @@ mod tests {
         assert_eq!(
             line.display_text(8),
             "2026-11-01 10:30 +0900 Alice    I [main] <v1> {origin/main} Initial commit"
+        );
+    }
+
+    #[test]
+    fn maps_diff_sides_to_the_correct_source_versions() {
+        assert_eq!(
+            context_object(&DiffSource::Worktree, "src/main.rs", DiffSide::New),
+            ContextObject::Worktree
+        );
+        assert_eq!(
+            context_object(&DiffSource::Worktree, "src/main.rs", DiffSide::Old),
+            ContextObject::Git {
+                object: ":src/main.rs".into(),
+                version: "INDEX".into(),
+            }
+        );
+        assert_eq!(
+            context_object(&DiffSource::Staged, "src/main.rs", DiffSide::Old),
+            ContextObject::Git {
+                object: "HEAD:src/main.rs".into(),
+                version: "HEAD".into(),
+            }
+        );
+        assert_eq!(
+            context_object(
+                &DiffSource::Commit("1234567890abcdef".into()),
+                "src/main.rs",
+                DiffSide::New,
+            ),
+            ContextObject::Git {
+                object: "1234567890abcdef:src/main.rs".into(),
+                version: "1234567890ab".into(),
+            }
         );
     }
 }

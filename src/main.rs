@@ -147,6 +147,40 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
             continue;
         }
 
+        if app.view == View::Context {
+            let (_, terminal_height) = crossterm::terminal::size()?;
+            let page = terminal_height.saturating_sub(1).max(1) as isize;
+            let half_page = (page / 2).max(1);
+            match (key.code, key.modifiers) {
+                (KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('b'), KeyModifiers::NONE) => {
+                    app.close_context()
+                }
+                (KeyCode::Char('j') | KeyCode::Down, KeyModifiers::NONE) => app.move_context(1),
+                (KeyCode::Char('k') | KeyCode::Up, KeyModifiers::NONE) => app.move_context(-1),
+                (KeyCode::Char('J'), KeyModifiers::SHIFT) => app.move_context(10),
+                (KeyCode::Char('K'), KeyModifiers::SHIFT) => app.move_context(-10),
+                (KeyCode::Char('d'), KeyModifiers::CONTROL) => app.move_context(half_page),
+                (KeyCode::Char('u'), KeyModifiers::CONTROL) => app.move_context(-half_page),
+                (KeyCode::Char('f'), KeyModifiers::CONTROL) | (KeyCode::PageDown, _) => {
+                    app.move_context(page)
+                }
+                (KeyCode::Char('b'), KeyModifiers::CONTROL) | (KeyCode::PageUp, _) => {
+                    app.move_context(-page)
+                }
+                (KeyCode::Char('g'), KeyModifiers::NONE) => app.handle_context_g(),
+                (KeyCode::Char('G'), KeyModifiers::SHIFT) | (KeyCode::End, _) => {
+                    app.select_context_end()
+                }
+                (KeyCode::Home, _) => {
+                    app.context_cursor = 0;
+                    app.pending_g = false;
+                }
+                (KeyCode::Char('?'), _) => app.open_help(),
+                _ => app.pending_g = false,
+            }
+            continue;
+        }
+
         if app.view == View::Diff {
             if app.input_mode == InputMode::Command {
                 match key.code {
@@ -228,7 +262,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 (KeyCode::Char('V'), KeyModifiers::SHIFT) => app.toggle_range_selection(),
                 (KeyCode::Char('F'), KeyModifiers::SHIFT) => app.start_file_comment(),
                 (KeyCode::Char('C'), KeyModifiers::SHIFT) => app.start_commit_comment(),
-                (KeyCode::Enter, KeyModifiers::NONE) => app.edit_inline_comment(),
+                (KeyCode::Enter, KeyModifiers::NONE) => app.activate_diff_selection(),
                 (KeyCode::Char('v'), KeyModifiers::NONE) => app.open_comments(),
                 (KeyCode::Char('t'), KeyModifiers::NONE) => app.open_files(),
                 (KeyCode::Char(':'), KeyModifiers::NONE) => app.start_command(),

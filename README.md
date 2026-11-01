@@ -114,7 +114,7 @@ the selected agent session.
 | `V`, then `j`/`k`, `a` | Select a line range and add a range comment |
 | `F` | Add a comment for the current file |
 | `C` | Add a comment for the whole commit |
-| `Enter` | Edit a review comment, or reply to a selected thread message |
+| `Enter` | Open the selected line in code context, edit a review, or reply to a thread |
 | `v` | Open the review comment list |
 | `t` | Open the changed-file navigator (`Δ` Agent change, `◆` Intent count, `●` review count) |
 | `i` | Show or hide Agent Intent cards |
@@ -124,6 +124,17 @@ the selected agent session.
 | `r` | Reload the current commit diff |
 | `:` | Open command input |
 | `Esc`, `q` | Return to history |
+
+### Code context
+
+Press `Enter` on an added, removed, or context line to open the surrounding
+source file. Added and context lines use the post-change file; removed lines
+use the pre-change file. This also works for commit, working-tree, and staged
+diffs. `j`/`k`, page movement, `gg`, and `G` use the same Vim-style navigation
+as the diff. Press `b`, `Esc`, or `q` to return to the same diff position.
+
+Context files are read-only. atig refuses files larger than 2 MiB and files
+that are not UTF-8 text.
 
 ### Review comments
 
