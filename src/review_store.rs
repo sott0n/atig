@@ -120,6 +120,7 @@ mod tests {
             question: "Why?".into(),
             agent: "codex:session".into(),
             answer: Some("Because.".into()),
+            references: Vec::new(),
         }];
 
         store.save(&comments, &understanding_threads).unwrap();

@@ -341,6 +341,27 @@ fn understanding_thread_box(
             Span::styled(chunk, Style::default().fg(Color::White)),
         ]));
     }
+    for (index, point) in thread.references.iter().enumerate() {
+        lines.push(Line::from(vec![
+            Span::styled("  ├ ", Style::default().fg(Color::Magenta)),
+            Span::styled(
+                format!("READ {}", index + 1),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" · {}", reading_point_location(point)),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+        for chunk in wrap_comment_body(&point.reason, content_width) {
+            lines.push(Line::from(vec![
+                Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
+                Span::styled(chunk, Style::default().fg(Color::White)),
+            ]));
+        }
+    }
     lines
 }
 
@@ -1281,6 +1302,12 @@ mod tests {
             question: "Why retry here?".into(),
             agent: "codex:session-1".into(),
             answer: Some("This is the shared request boundary.".into()),
+            references: vec![crate::app::AgentReadingPoint {
+                file: "src/client.rs".into(),
+                line: 42,
+                symbol: "Client::send".into(),
+                reason: "Shows the request boundary".into(),
+            }],
         };
         let text = understanding_thread_box(&thread, 1, 60)
             .iter()
@@ -1292,6 +1319,7 @@ mod tests {
         assert!(text.contains("Why retry here?"));
         assert!(text.contains("AGENT · codex:session-1"));
         assert!(text.contains("shared request boundary"));
+        assert!(text.contains("READ 1 · Client::send · src/client.rs:42"));
     }
 
     #[test]

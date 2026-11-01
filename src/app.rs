@@ -64,7 +64,7 @@ pub struct AgentIntent {
     pub reading_path: Vec<AgentReadingPoint>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentReadingPoint {
     pub file: String,
     pub line: usize,
@@ -143,6 +143,8 @@ pub struct UnderstandingThread {
     pub question: String,
     pub agent: String,
     pub answer: Option<String>,
+    #[serde(default)]
+    pub references: Vec<AgentReadingPoint>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1161,6 +1163,17 @@ impl App {
 
     pub fn begin_context_jump(&mut self, direction: isize) {
         self.pending_g = false;
+        let references = self
+            .understanding_threads_at_context(self.context_cursor + 1)
+            .into_iter()
+            .rev()
+            .find(|thread| !thread.references.is_empty())
+            .map(|thread| thread.references.clone())
+            .unwrap_or_default();
+        if !references.is_empty() {
+            self.context_reading_path = references;
+            self.context_reading_index = None;
+        }
         self.context_jump_direction = Some(direction.signum());
     }
 
@@ -1258,6 +1271,7 @@ impl App {
             question,
             agent: target.response_label(),
             answer: None,
+            references: Vec::new(),
         });
         self.persist_reviews();
         let (tx, rx) = mpsc::channel();
@@ -1428,8 +1442,24 @@ impl App {
                             changed.join(", ")
                         ));
                     }
+                    let (answer, references) = parse_understanding_response(&response);
+                    let mut active_context = false;
                     if let Some(thread) = self.understanding_threads.get_mut(index) {
-                        thread.answer = Some(response);
+                        active_context = thread.source
+                            == self
+                                .diff_source
+                                .as_ref()
+                                .map(git::DiffSource::id)
+                                .unwrap_or_default()
+                            && thread.version == self.context_version
+                            && thread.file == self.context_path
+                            && thread.line == self.context_cursor + 1;
+                        thread.answer = Some(answer);
+                        thread.references = references.clone();
+                    }
+                    if active_context && !references.is_empty() {
+                        self.context_reading_path = references;
+                        self.context_reading_index = None;
                     }
                     self.dispatched_agent = None;
                     self.dispatched_comments.clear();
@@ -2016,6 +2046,8 @@ fn changed_paths(before: &git::ChangeSnapshot, after: &git::ChangeSnapshot) -> V
 
 const INTENTS_START: &str = "<atig-intents>";
 const INTENTS_END: &str = "</atig-intents>";
+const REFERENCES_START: &str = "<atig-references>";
+const REFERENCES_END: &str = "</atig-references>";
 
 pub fn visible_agent_response(body: &str) -> &str {
     body.split_once(INTENTS_START)
@@ -2052,6 +2084,25 @@ fn parse_agent_intents(body: &str) -> Vec<AgentIntent> {
         intent.reading_path.truncate(5);
     }
     intents
+}
+
+fn parse_understanding_response(body: &str) -> (String, Vec<AgentReadingPoint>) {
+    let Some((before, rest)) = body.split_once(REFERENCES_START) else {
+        return (body.trim().to_string(), Vec::new());
+    };
+    let Some((manifest, after)) = rest.split_once(REFERENCES_END) else {
+        return (before.trim().to_string(), Vec::new());
+    };
+    let mut references: Vec<AgentReadingPoint> =
+        serde_json::from_str(manifest.trim()).unwrap_or_default();
+    references.retain(|point| point.line > 0 && git::is_safe_repository_path(&point.file));
+    references.truncate(5);
+    let visible = [before.trim(), after.trim()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    (visible, references)
 }
 
 fn scope_diff_index(diff: &[String], scope: &ReviewScope) -> Option<usize> {
@@ -2149,7 +2200,7 @@ fn format_understanding_request(
     let start = line.saturating_sub(13);
     let end = line.saturating_add(12).min(source.len());
     let mut prompt = format!(
-        "Help a human understand the existing code at {file}:{line}. Answer the question using read-only inspection only. Do not edit, create, delete, or format files; do not commit or push. Explain the behavior and rationale from the code, cite repository-relative file:line locations for important claims, and say when something cannot be determined from the code.\n"
+        "Help a human understand the existing code at {file}:{line}. Answer the question using read-only inspection only. Do not edit, create, delete, or format files; do not commit or push. Explain the behavior and rationale from the code, cite repository-relative file:line locations for important claims, and say when something cannot be determined from the code. After your normal answer, append up to five important code references in exactly this form, without a Markdown code fence:\n<atig-references>\n[{{\"file\":\"relative/path.rs\",\"line\":123,\"symbol\":\"Type::method\",\"reason\":\"Why this location supports the explanation\"}}]\n</atig-references>\nUse repository-relative post-change locations, an empty symbol when unavailable, and [] when no extra code should be read.\n"
     );
     let answered = previous
         .iter()
@@ -2860,12 +2911,20 @@ mod tests {
             question: "Why is this branch needed?".into(),
             agent: "codex:session-1".into(),
             answer: None,
+            references: Vec::new(),
         });
+        app.diff_source = Some(git::DiffSource::Worktree);
+        app.context_version = "WORKTREE".into();
+        app.context_path = "src/main.rs".into();
+        app.context_cursor = 11;
         app.dispatch_purpose = Some(DispatchPurpose::Understanding(0));
         app.dispatching = true;
         let (tx, rx) = mpsc::channel();
-        tx.send(DispatchEvent::Done("It handles the fallback path.".into()))
-            .unwrap();
+        tx.send(DispatchEvent::Done(
+            "It handles the fallback path.\n<atig-references>\n[{\"file\":\"Cargo.toml\",\"line\":1,\"symbol\":\"package\",\"reason\":\"Shows the crate context\"}]\n</atig-references>"
+                .into(),
+        ))
+        .unwrap();
         app.dispatch_rx = Some(rx);
 
         assert!(app.drain_dispatch_events());
@@ -2873,7 +2932,19 @@ mod tests {
             app.understanding_threads[0].answer.as_deref(),
             Some("It handles the fallback path.")
         );
+        assert_eq!(
+            app.understanding_threads[0].references,
+            [AgentReadingPoint {
+                file: "Cargo.toml".into(),
+                line: 1,
+                symbol: "package".into(),
+                reason: "Shows the crate context".into(),
+            }]
+        );
         assert_eq!(app.message, "Agent explanation received");
+        app.begin_context_jump(1);
+        app.complete_context_reading_jump();
+        assert_eq!(app.context_path, "Cargo.toml");
     }
 
     #[test]
@@ -2907,6 +2978,7 @@ mod tests {
                 question: format!("question-{turn}"),
                 agent: "codex:session-1".into(),
                 answer: Some(format!("answer-{turn}")),
+                references: Vec::new(),
             })
             .collect::<Vec<_>>();
         let previous = threads.iter().collect::<Vec<_>>();
@@ -2923,6 +2995,18 @@ mod tests {
         assert!(prompt.contains("question-1"));
         assert!(prompt.contains("answer-6"));
         assert!(prompt.contains("Current question: one more question"));
+    }
+
+    #[test]
+    fn understanding_reference_manifest_is_hidden_and_safely_filtered() {
+        let response = "Explanation.\n<atig-references>\n[{\"file\":\"../secret\",\"line\":1,\"reason\":\"unsafe\"},{\"file\":\"src/main.rs\",\"line\":12,\"reason\":\"entry point\"}]\n</atig-references>\nSafety warning: changed file.";
+
+        let (answer, references) = parse_understanding_response(response);
+
+        assert_eq!(answer, "Explanation.\n\nSafety warning: changed file.");
+        assert_eq!(references.len(), 1);
+        assert_eq!(references[0].file, "src/main.rs");
+        assert!(!answer.contains("atig-references"));
     }
 
     #[test]

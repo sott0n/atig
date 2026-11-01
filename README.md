@@ -148,6 +148,10 @@ understanding request, atig adds a visible safety warning to the answer.
 Press `Q` again on the same source line to ask a follow-up. atig includes up
 to the six most recent answered turns from that exact file version and line,
 so the Agent can continue the explanation without mixing in unrelated code.
+Agent answers can include up to five explicit code references. They appear as
+`READ 1`, `READ 2`, and so on beneath the answer; use `]r`/`[r` from that
+source line to move through the referenced code. atig hides the transport
+manifest and rejects unsafe or invalid reference paths.
 
 Context files are read-only. atig refuses files larger than 2 MiB and files
 that are not UTF-8 text.
