@@ -121,6 +121,23 @@ pub enum DiffEvent {
     Error(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiffSource {
+    Commit(String),
+    Worktree,
+    Staged,
+}
+
+impl DiffSource {
+    pub fn id(&self) -> String {
+        match self {
+            Self::Commit(oid) => oid.clone(),
+            Self::Worktree => "WORKTREE".into(),
+            Self::Staged => "STAGED".into(),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Cancellation(Arc<AtomicBool>);
 
@@ -149,31 +166,42 @@ pub fn stream_history(revisions: Vec<String>, sender: Sender<HistoryEvent>) -> C
     cancellation
 }
 
-pub fn stream_diff(oid: String, sender: Sender<DiffEvent>) -> Cancellation {
+pub fn stream_diff(source: DiffSource, sender: Sender<DiffEvent>) -> Cancellation {
     let cancellation = Cancellation::new();
     let worker_cancellation = cancellation.clone();
     thread::spawn(move || {
-        if let Err(error) = run_git_show(&oid, &sender, &worker_cancellation) {
+        if let Err(error) = run_git_diff(&source, &sender, &worker_cancellation) {
             let _ = sender.send(DiffEvent::Error(error));
         }
     });
     cancellation
 }
 
-fn run_git_show(
-    oid: &str,
+fn run_git_diff(
+    source: &DiffSource,
     sender: &Sender<DiffEvent>,
     cancellation: &Cancellation,
 ) -> Result<(), String> {
-    let mut child = Command::new("git")
-        .args([
-            "--no-pager",
-            "show",
-            "--no-ext-diff",
-            "--color=never",
-            "--format=fuller",
-            oid,
-        ])
+    let mut command = Command::new("git");
+    command.arg("--no-pager");
+    match source {
+        DiffSource::Commit(oid) => {
+            command.args([
+                "show",
+                "--no-ext-diff",
+                "--color=never",
+                "--format=fuller",
+                oid,
+            ]);
+        }
+        DiffSource::Worktree => {
+            command.args(["diff", "--no-ext-diff", "--color=never"]);
+        }
+        DiffSource::Staged => {
+            command.args(["diff", "--cached", "--no-ext-diff", "--color=never"]);
+        }
+    }
+    let mut child = command
         .env("GIT_PAGER", "cat")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

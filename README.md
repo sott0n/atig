@@ -150,6 +150,8 @@ response; quitting the application discards them.
 | `:session other <id>` | Select an extension target; delivery requires a custom adapter |
 | `:session clear` | Clear the selected agent session |
 | `:sessions` | Discover and select sessions associated with this repository |
+| `:worktree` | Review unstaged working-tree changes |
+| `:staged` | Review staged changes |
 | `:help` | Open the key reference |
 | `:q`, `:quit` | Quit `atig` |
 

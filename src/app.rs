@@ -95,6 +95,7 @@ pub struct App {
     pub view: View,
     pub diff: Vec<String>,
     pub diff_oid: Option<String>,
+    diff_source: Option<git::DiffSource>,
     pub diff_loading: bool,
     pub diff_scroll: usize,
     pub diff_comment_selected: Option<usize>,
@@ -143,6 +144,7 @@ impl App {
             view: View::History,
             diff: Vec::new(),
             diff_oid: None,
+            diff_source: None,
             diff_loading: false,
             diff_scroll: 0,
             diff_comment_selected: None,
@@ -190,10 +192,12 @@ impl App {
         if let Some(cancellation) = self.diff_cancel.take() {
             cancellation.cancel();
         }
-        self.diff_cancel = Some(git::stream_diff(oid.clone(), tx));
+        let source = git::DiffSource::Commit(oid.clone());
+        self.diff_cancel = Some(git::stream_diff(source.clone(), tx));
         self.view = View::Diff;
         self.diff.clear();
         self.diff_oid = Some(oid);
+        self.diff_source = Some(source);
         self.diff_loading = true;
         self.diff_scroll = 0;
         self.diff_comment_selected = None;
@@ -217,14 +221,14 @@ impl App {
     }
 
     pub fn reload_diff(&mut self) {
-        let Some(oid) = self.diff_oid.clone() else {
+        let Some(source) = self.diff_source.clone() else {
             return;
         };
         let (tx, rx) = mpsc::channel();
         if let Some(cancellation) = self.diff_cancel.take() {
             cancellation.cancel();
         }
-        self.diff_cancel = Some(git::stream_diff(oid, tx));
+        self.diff_cancel = Some(git::stream_diff(source, tx));
         self.diff.clear();
         self.diff_scroll = 0;
         self.diff_comment_selected = None;
@@ -232,6 +236,34 @@ impl App {
         self.diff_loading = true;
         self.diff_rx = Some(rx);
         self.message = "Reloading commit diff...".into();
+    }
+
+    pub fn open_worktree_diff(&mut self) {
+        self.open_diff_source(git::DiffSource::Worktree);
+    }
+
+    pub fn open_staged_diff(&mut self) {
+        self.open_diff_source(git::DiffSource::Staged);
+    }
+
+    fn open_diff_source(&mut self, source: git::DiffSource) {
+        if let Some(cancellation) = self.diff_cancel.take() {
+            cancellation.cancel();
+        }
+        let id = source.id();
+        let (tx, rx) = mpsc::channel();
+        self.diff_cancel = Some(git::stream_diff(source.clone(), tx));
+        self.diff.clear();
+        self.diff_oid = Some(id.clone());
+        self.diff_source = Some(source);
+        self.view = View::Diff;
+        self.diff_loading = true;
+        self.diff_scroll = 0;
+        self.diff_comment_selected = None;
+        self.diff_thread_selected = None;
+        self.diff_jump_direction = None;
+        self.diff_rx = Some(rx);
+        self.message = format!("Loading {id} diff...");
     }
 
     pub fn open_help(&mut self) {
@@ -1069,6 +1101,8 @@ impl App {
                 _ => self.message = "Usage: :session <codex|claude|other> <id>".into(),
             },
             Some("sessions") => self.open_sessions(),
+            Some("worktree") => self.open_worktree_diff(),
+            Some("staged") => self.open_staged_diff(),
             Some("goto") => match (parts.next(), parts.next()) {
                 (Some(line), None) if self.view == View::Diff => match line.parse::<usize>() {
                     Ok(line) if line > 0 => self.go_to_diff_line(line),
