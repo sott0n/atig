@@ -139,6 +139,14 @@ Use `/` to search the current source file, then `n` and `N` to move to the
 next or previous match with wraparound. Search moves the code cursor, so it
 can also extend a `V` selection to a matching line.
 
+Press `*` to search for literal text across the repository version currently
+being reviewed. Results stream into a Vim-style picker; use `j`/`k` and
+`Enter` to open a match, or `q` to return. Commit diffs search that commit (or
+its parent for removed code), staged diffs search the index or `HEAD`, and
+working-tree diffs include tracked and untracked working-tree files. Opening
+a result participates in `Ctrl-o`/`Ctrl-i` context navigation. Results are
+limited to 200 so broad searches remain responsive.
+
 When the selected Agent Intent includes a Reading Trail, the Context View
 shows why each related location matters. Use `]r` and `[r` to follow the trail
 forward and backward. atig opens only safe repository-relative text files;

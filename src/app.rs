@@ -6,7 +6,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::agent::{self, AgentSession, AgentTarget, DispatchEvent, SessionListEvent};
-use crate::git::{self, DiffEvent, HistoryEvent, HistoryLine};
+use crate::git::{self, DiffEvent, HistoryEvent, HistoryLine, SearchEvent, SearchMatch};
 use crate::review_store::ReviewStore;
 
 const MAX_EVENTS_PER_TICK: usize = 256;
@@ -23,6 +23,7 @@ pub enum InputMode {
     Question,
     ConfirmSend,
     Search,
+    RepositorySearch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +35,7 @@ pub enum View {
     Files,
     Help,
     Sessions,
+    RepositorySearch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,6 +230,11 @@ pub struct App {
     pub delivery_message: Option<String>,
     pub search_input: String,
     pub search_query: String,
+    pub repository_search_input: String,
+    pub repository_search_query: String,
+    pub repository_search_results: Vec<SearchMatch>,
+    pub repository_search_selected: usize,
+    pub repository_search_loading: bool,
     pub sessions: Vec<AgentSession>,
     pub session_selected: usize,
     pub sessions_loading: bool,
@@ -249,6 +256,8 @@ pub struct App {
     history_cancel: Option<git::Cancellation>,
     diff_rx: Option<Receiver<DiffEvent>>,
     diff_cancel: Option<git::Cancellation>,
+    repository_search_rx: Option<Receiver<SearchEvent>>,
+    repository_search_cancel: Option<git::Cancellation>,
     pending_graph: Option<String>,
     review_store: Option<ReviewStore>,
 }
@@ -301,6 +310,11 @@ impl App {
             delivery_message: None,
             search_input: String::new(),
             search_query: String::new(),
+            repository_search_input: String::new(),
+            repository_search_query: String::new(),
+            repository_search_results: Vec::new(),
+            repository_search_selected: 0,
+            repository_search_loading: false,
             sessions: Vec::new(),
             session_selected: 0,
             sessions_loading: false,
@@ -322,6 +336,8 @@ impl App {
             history_cancel: None,
             diff_rx: None,
             diff_cancel: None,
+            repository_search_rx: None,
+            repository_search_cancel: None,
             pending_graph: None,
             review_store: None,
         }
@@ -569,7 +585,9 @@ impl App {
                 direction,
                 |index| self.context_lines[index].to_lowercase().contains(&query),
             ),
-            View::Comments | View::Files | View::Help | View::Sessions => None,
+            View::Comments | View::Files | View::Help | View::Sessions | View::RepositorySearch => {
+                None
+            }
         };
         match (self.view, destination) {
             (View::History, Some(index)) => self.selected = Some(index),
@@ -585,6 +603,137 @@ impl App {
             }
             (_, Some(_)) => {}
             (_, None) => self.message = format!("Pattern not found: {}", self.search_query),
+        }
+    }
+
+    pub fn start_repository_search(&mut self) {
+        self.repository_search_input.clear();
+        self.input_mode = InputMode::RepositorySearch;
+    }
+
+    pub fn repository_search_push(&mut self, character: char) {
+        self.repository_search_input.push(character);
+    }
+
+    pub fn repository_search_backspace(&mut self) {
+        if self.repository_search_input.pop().is_none() {
+            self.cancel_repository_search_input();
+        }
+    }
+
+    pub fn cancel_repository_search_input(&mut self) {
+        self.repository_search_input.clear();
+        self.input_mode = InputMode::Normal;
+    }
+
+    pub fn submit_repository_search(&mut self) {
+        let query = self.repository_search_input.trim().to_string();
+        self.repository_search_input.clear();
+        self.input_mode = InputMode::Normal;
+        if query.is_empty() {
+            return;
+        }
+        let Some(source) = self.diff_source.clone() else {
+            self.message = "No source available for repository search".into();
+            return;
+        };
+        if let Some(cancellation) = self.repository_search_cancel.take() {
+            cancellation.cancel();
+        }
+        let (tx, rx) = mpsc::channel();
+        self.repository_search_cancel = Some(git::stream_search(
+            source,
+            self.context_side,
+            query.clone(),
+            tx,
+        ));
+        self.repository_search_rx = Some(rx);
+        self.repository_search_query = query.clone();
+        self.repository_search_results.clear();
+        self.repository_search_selected = 0;
+        self.repository_search_loading = true;
+        self.view = View::RepositorySearch;
+        self.message = format!("Searching repository for {query}...");
+    }
+
+    pub fn drain_repository_search_events(&mut self) -> bool {
+        let mut changed = false;
+        for _ in 0..MAX_EVENTS_PER_TICK {
+            let event = match self.repository_search_rx.as_ref().map(Receiver::try_recv) {
+                Some(Ok(event)) => event,
+                Some(Err(TryRecvError::Empty)) | None => break,
+                Some(Err(TryRecvError::Disconnected)) => SearchEvent::Done,
+            };
+            changed = true;
+            match event {
+                SearchEvent::Match(found) => self.repository_search_results.push(found),
+                SearchEvent::Done => {
+                    self.repository_search_rx = None;
+                    self.repository_search_cancel = None;
+                    self.repository_search_loading = false;
+                    self.message = format!(
+                        "{} repository matches",
+                        self.repository_search_results.len()
+                    );
+                    break;
+                }
+                SearchEvent::Error(error) => {
+                    self.repository_search_rx = None;
+                    self.repository_search_cancel = None;
+                    self.repository_search_loading = false;
+                    self.message = error;
+                    break;
+                }
+            }
+        }
+        changed
+    }
+
+    pub fn move_repository_search_selection(&mut self, amount: isize) {
+        if amount < 0 {
+            self.repository_search_selected = self
+                .repository_search_selected
+                .saturating_sub(amount.unsigned_abs());
+        } else {
+            self.repository_search_selected = self
+                .repository_search_selected
+                .saturating_add(amount as usize)
+                .min(self.repository_search_results.len().saturating_sub(1));
+        }
+    }
+
+    pub fn close_repository_search(&mut self) {
+        if let Some(cancellation) = self.repository_search_cancel.take() {
+            cancellation.cancel();
+        }
+        self.repository_search_rx = None;
+        self.repository_search_loading = false;
+        self.view = View::Context;
+    }
+
+    pub fn select_repository_search_result(&mut self) {
+        let Some(found) = self
+            .repository_search_results
+            .get(self.repository_search_selected)
+            .cloned()
+        else {
+            self.message = "No repository search result selected".into();
+            return;
+        };
+        if let Some(cancellation) = self.repository_search_cancel.take() {
+            cancellation.cancel();
+        }
+        self.repository_search_rx = None;
+        self.repository_search_loading = false;
+        let origin = self.current_context_location();
+        if self.load_context_file(&found.path, found.line, self.context_side) {
+            self.context_reading_index = None;
+            if let Some(origin) = origin {
+                self.context_back_stack.push(origin);
+            }
+            self.context_forward_stack.clear();
+            self.view = View::Context;
+            self.message = format!("Found {}:{}", found.path, found.line);
         }
     }
 
@@ -2166,6 +2315,9 @@ impl Drop for App {
         if let Some(cancellation) = self.diff_cancel.take() {
             cancellation.cancel();
         }
+        if let Some(cancellation) = self.repository_search_cancel.take() {
+            cancellation.cancel();
+        }
     }
 }
 
@@ -3489,6 +3641,33 @@ mod tests {
         app.drain_history_events();
         assert_eq!(app.history.len(), 300);
         assert!(!app.loading);
+    }
+
+    #[test]
+    fn repository_search_streams_results_and_moves_selection() {
+        let mut app = App::new();
+        let (tx, rx) = mpsc::channel();
+        tx.send(SearchEvent::Match(SearchMatch {
+            path: "src/app.rs".into(),
+            line: 10,
+            text: "first match".into(),
+        }))
+        .unwrap();
+        tx.send(SearchEvent::Match(SearchMatch {
+            path: "src/main.rs".into(),
+            line: 20,
+            text: "second match".into(),
+        }))
+        .unwrap();
+        tx.send(SearchEvent::Done).unwrap();
+        app.repository_search_rx = Some(rx);
+        app.repository_search_loading = true;
+
+        assert!(app.drain_repository_search_events());
+        assert_eq!(app.repository_search_results.len(), 2);
+        assert!(!app.repository_search_loading);
+        app.move_repository_search_selection(1);
+        assert_eq!(app.repository_search_selected, 1);
     }
 
     #[test]

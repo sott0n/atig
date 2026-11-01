@@ -43,6 +43,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
         draw_sessions(frame, app, &areas);
         return;
     }
+    if app.view == View::RepositorySearch {
+        draw_repository_search(frame, app, &areas);
+        return;
+    }
 
     let viewport_height = areas[0].height as usize;
     let start = viewport_start(app, viewport_height);
@@ -117,6 +121,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
         InputMode::Question => unreachable!("questions are drawn in the context view"),
         InputMode::ConfirmSend => unreachable!("send confirmation is drawn in the review view"),
         InputMode::Search => draw_search_prompt(frame, app, areas[1]),
+        InputMode::RepositorySearch => {
+            unreachable!("repository search starts from code context")
+        }
     }
 }
 
@@ -140,6 +147,7 @@ fn draw_help(frame: &mut Frame, areas: &[ratatui::layout::Rect]) {
         "Ctrl-o / Ctrl-i    older / newer context location",
         "Q                 ask Agent about context line",
         "V, move, Q        ask Agent about a code range",
+        "*                 search the repository version",
         "R                 build an Agent reading path",
         "T                 expand / collapse reading path",
         ":goto <line>       jump to a diff line",
@@ -290,6 +298,10 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
         draw_search_prompt(frame, app, areas[1]);
         return;
     }
+    if app.input_mode == InputMode::RepositorySearch {
+        draw_repository_search_prompt(frame, app, areas[1]);
+        return;
+    }
 
     let position = if app.context_lines.is_empty() {
         0
@@ -302,7 +314,7 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
             format!("VISUAL LINES {start}-{end} · Q ask range · V/Esc cancel")
         } else {
             format!(
-                "{} · {} · line {position}/{} · / search · Q ask · R guide · T trail · [c/]c changes · [r/]r trail · ^o/^i history · b diff",
+                "{} · {} · line {position}/{} · / file · * repo · Q ask · R guide · T trail · [c/]c changes · [r/]r trail · ^o/^i history · b diff",
                 app.context_path,
                 app.context_version,
                 app.context_lines.len()
@@ -630,6 +642,70 @@ fn draw_sessions(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) 
     );
 }
 
+fn draw_repository_search(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
+    let height = areas[0].height as usize;
+    let start = app
+        .repository_search_selected
+        .saturating_sub((height / 4).max(1))
+        .min(app.repository_search_results.len().saturating_sub(height));
+    let lines = app
+        .repository_search_results
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(height)
+        .map(|(index, found)| {
+            let spans = vec![
+                Span::styled(found.path.clone(), Style::default().fg(Color::Cyan)),
+                Span::styled(
+                    format!(":{} ", found.line),
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::raw(found.text.trim().to_string()),
+            ];
+            let mut line = Line::from(spans);
+            if index == app.repository_search_selected {
+                line = line.style(
+                    Style::default()
+                        .fg(Color::White)
+                        .bg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                );
+                line.push_span(Span::styled(
+                    " ".repeat((areas[0].width as usize).saturating_sub(line.width())),
+                    Style::default().bg(Color::Green),
+                ));
+            }
+            line
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(Text::from(lines)), areas[0]);
+
+    let state = if app.repository_search_loading {
+        "searching"
+    } else if app.repository_search_results.len() == 200 {
+        "200 matches (limit)"
+    } else {
+        "complete"
+    };
+    let left = format!(
+        "repo search '{}' · {} matches · {state}",
+        app.repository_search_query,
+        app.repository_search_results.len()
+    );
+    let right = "j/k move  Enter open  q back";
+    let gap = (areas[1].width as usize).saturating_sub(left.chars().count() + right.len());
+    frame.render_widget(
+        Paragraph::new(format!("{left}{}{right}", " ".repeat(gap))).style(
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        ),
+        areas[1],
+    );
+}
+
 fn draw_comments(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
     let height = areas[0].height as usize;
     let start = app
@@ -723,6 +799,18 @@ fn draw_search_prompt(frame: &mut Frame, app: &App, area: ratatui::layout::Rect)
         .x
         .saturating_add(1)
         .saturating_add(app.search_input.chars().count() as u16)
+        .min(area.right().saturating_sub(1));
+    frame.set_cursor_position((cursor_x, area.y));
+}
+
+fn draw_repository_search_prompt(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let prefix = "Repo search: ";
+    let prompt = format!("{prefix}{}", app.repository_search_input);
+    frame.render_widget(Paragraph::new(prompt), area);
+    let cursor_x = area
+        .x
+        .saturating_add(prefix.len() as u16)
+        .saturating_add(app.repository_search_input.chars().count() as u16)
         .min(area.right().saturating_sub(1));
     frame.set_cursor_position((cursor_x, area.y));
 }

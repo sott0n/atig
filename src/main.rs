@@ -35,6 +35,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
         needs_draw |= app.drain_diff_events();
         needs_draw |= app.drain_dispatch_events();
         needs_draw |= app.drain_session_events();
+        needs_draw |= app.drain_repository_search_events();
         if needs_draw {
             terminal.draw(|frame| ui::draw(frame, &app))?;
             needs_draw = false;
@@ -73,6 +74,17 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
             continue;
         }
 
+        if app.input_mode == InputMode::RepositorySearch {
+            match key.code {
+                KeyCode::Esc => app.cancel_repository_search_input(),
+                KeyCode::Enter => app.submit_repository_search(),
+                KeyCode::Backspace => app.repository_search_backspace(),
+                KeyCode::Char(character) => app.repository_search_push(character),
+                _ => {}
+            }
+            continue;
+        }
+
         if app.view == View::Help {
             if matches!(
                 key.code,
@@ -94,6 +106,24 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 }
                 (KeyCode::Enter, KeyModifiers::NONE) => app.select_agent_session(),
                 (KeyCode::Char('r'), KeyModifiers::NONE) => app.open_sessions(),
+                (KeyCode::Char('?'), _) => app.open_help(),
+                _ => {}
+            }
+            continue;
+        }
+
+        if app.view == View::RepositorySearch {
+            match (key.code, key.modifiers) {
+                (KeyCode::Esc | KeyCode::Char('q'), KeyModifiers::NONE) => {
+                    app.close_repository_search()
+                }
+                (KeyCode::Char('j') | KeyCode::Down, KeyModifiers::NONE) => {
+                    app.move_repository_search_selection(1)
+                }
+                (KeyCode::Char('k') | KeyCode::Up, KeyModifiers::NONE) => {
+                    app.move_repository_search_selection(-1)
+                }
+                (KeyCode::Enter, KeyModifiers::NONE) => app.select_repository_search_result(),
                 (KeyCode::Char('?'), _) => app.open_help(),
                 _ => {}
             }
@@ -210,6 +240,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 (KeyCode::Char('V'), KeyModifiers::SHIFT) => app.toggle_context_range(),
                 (KeyCode::Char('s'), KeyModifiers::NONE) => app.open_sessions(),
                 (KeyCode::Char('/'), KeyModifiers::NONE) => app.start_search(),
+                (KeyCode::Char('*'), _) => app.start_repository_search(),
                 (KeyCode::Char('n'), KeyModifiers::NONE) => app.repeat_search(1),
                 (KeyCode::Char('N'), KeyModifiers::SHIFT) => app.repeat_search(-1),
                 (KeyCode::Char('?'), _) => app.open_help(),
@@ -352,6 +383,9 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
             InputMode::Question => unreachable!("questions are only entered in the context view"),
             InputMode::ConfirmSend => unreachable!("send confirmation is handled first"),
             InputMode::Search => unreachable!("search input is handled first"),
+            InputMode::RepositorySearch => {
+                unreachable!("repository search input is handled first")
+            }
         }
     }
 

@@ -127,6 +127,19 @@ pub enum DiffEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchMatch {
+    pub path: String,
+    pub line: usize,
+    pub text: String,
+}
+
+pub enum SearchEvent {
+    Match(SearchMatch),
+    Done,
+    Error(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiffSource {
     Commit(String),
     Worktree,
@@ -346,6 +359,141 @@ pub fn stream_diff(source: DiffSource, sender: Sender<DiffEvent>) -> Cancellatio
         }
     });
     cancellation
+}
+
+pub fn stream_search(
+    source: DiffSource,
+    side: DiffSide,
+    query: String,
+    sender: Sender<SearchEvent>,
+) -> Cancellation {
+    let cancellation = Cancellation::new();
+    let worker_cancellation = cancellation.clone();
+    thread::spawn(move || {
+        if let Err(error) = run_git_search(&source, side, &query, &sender, &worker_cancellation) {
+            let _ = sender.send(SearchEvent::Error(error));
+        }
+    });
+    cancellation
+}
+
+fn run_git_search(
+    source: &DiffSource,
+    side: DiffSide,
+    query: &str,
+    sender: &Sender<SearchEvent>,
+    cancellation: &Cancellation,
+) -> Result<(), String> {
+    const MAX_RESULTS: usize = 200;
+    let (cached, tree) = search_tree(source, side);
+    let untracked = matches!(source, DiffSource::Worktree) && side == DiffSide::New;
+    let mut command = Command::new("git");
+    command.args([
+        "--no-pager",
+        "grep",
+        "-n",
+        "-z",
+        "-I",
+        "-F",
+        "--full-name",
+        "-e",
+        query,
+    ]);
+    if cached {
+        command.arg("--cached");
+    }
+    if untracked {
+        command.arg("--untracked");
+    }
+    if let Some(tree) = &tree {
+        command.arg(tree);
+    }
+    let mut child = command
+        .env("GIT_PAGER", "cat")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("Failed to start repository search: {error}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Failed to capture repository search output".to_string())?;
+    let mut reader = BufReader::new(stdout);
+    let prefix = tree.as_ref().map(|tree| format!("{tree}:"));
+    let mut record = Vec::new();
+    let mut count = 0;
+    loop {
+        record.clear();
+        if reader
+            .read_until(b'\n', &mut record)
+            .map_err(|error| format!("Failed to read repository search: {error}"))?
+            == 0
+        {
+            break;
+        }
+        if cancellation.is_cancelled() {
+            let _ = child.kill();
+            return Ok(());
+        }
+        if let Some(found) = parse_search_record(&record, prefix.as_deref()) {
+            if sender.send(SearchEvent::Match(found)).is_err() {
+                let _ = child.kill();
+                return Ok(());
+            }
+            count += 1;
+            if count >= MAX_RESULTS {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = sender.send(SearchEvent::Done);
+                return Ok(());
+            }
+        }
+    }
+    let status = child
+        .wait()
+        .map_err(|error| format!("Failed to wait for repository search: {error}"))?;
+    if status.success() || status.code() == Some(1) {
+        let _ = sender.send(SearchEvent::Done);
+        return Ok(());
+    }
+    let mut error = String::new();
+    if let Some(mut stderr) = child.stderr.take() {
+        let _ = stderr.read_to_string(&mut error);
+    }
+    Err(if error.trim().is_empty() {
+        format!("git grep exited with {status}")
+    } else {
+        error.trim().to_string()
+    })
+}
+
+fn search_tree(source: &DiffSource, side: DiffSide) -> (bool, Option<String>) {
+    match (source, side) {
+        (DiffSource::Worktree, DiffSide::New) => (false, None),
+        (DiffSource::Worktree, DiffSide::Old) | (DiffSource::Staged, DiffSide::New) => (true, None),
+        (DiffSource::Staged, DiffSide::Old) => (false, Some("HEAD".into())),
+        (DiffSource::Commit(oid), DiffSide::New) => (false, Some(oid.clone())),
+        (DiffSource::Commit(oid), DiffSide::Old) => (false, Some(format!("{oid}^"))),
+    }
+}
+
+fn parse_search_record(record: &[u8], prefix: Option<&str>) -> Option<SearchMatch> {
+    let record = record.strip_suffix(b"\n").unwrap_or(record);
+    let mut fields = record.splitn(3, |byte| *byte == 0);
+    let path = String::from_utf8(fields.next()?.to_vec()).ok()?;
+    let path = prefix
+        .and_then(|prefix| path.strip_prefix(prefix))
+        .unwrap_or(&path);
+    let line = String::from_utf8(fields.next()?.to_vec())
+        .ok()?
+        .parse()
+        .ok()?;
+    let text = String::from_utf8(fields.next()?.to_vec()).ok()?;
+    is_safe_repository_path(path).then(|| SearchMatch {
+        path: path.to_string(),
+        line,
+        text,
+    })
 }
 
 fn run_git_diff(
@@ -636,5 +784,40 @@ mod tests {
         assert!(!is_safe_repository_path("../outside"));
         assert!(!is_safe_repository_path("/etc/passwd"));
         assert!(!is_safe_repository_path("src/../outside"));
+    }
+
+    #[test]
+    fn maps_repository_search_to_the_reviewed_tree() {
+        assert_eq!(
+            search_tree(&DiffSource::Worktree, DiffSide::New),
+            (false, None)
+        );
+        assert_eq!(
+            search_tree(&DiffSource::Worktree, DiffSide::Old),
+            (true, None)
+        );
+        assert_eq!(
+            search_tree(&DiffSource::Staged, DiffSide::Old),
+            (false, Some("HEAD".into()))
+        );
+        assert_eq!(
+            search_tree(&DiffSource::Commit("abc123".into()), DiffSide::Old),
+            (false, Some("abc123^".into()))
+        );
+    }
+
+    #[test]
+    fn parses_null_delimited_repository_search_results() {
+        let found = parse_search_record(b"HEAD:src/main.rs\x0042\x00fn main() {}\n", Some("HEAD:"))
+            .unwrap();
+
+        assert_eq!(
+            found,
+            SearchMatch {
+                path: "src/main.rs".into(),
+                line: 42,
+                text: "fn main() {}".into(),
+            }
+        );
     }
 }
