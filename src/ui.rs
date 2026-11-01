@@ -212,7 +212,10 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
                 1 + app
                     .understanding_threads_at_context(index + 1)
                     .iter()
-                    .map(|thread| understanding_thread_box(thread, areas[0].width as usize).len())
+                    .enumerate()
+                    .map(|(turn, thread)| {
+                        understanding_thread_box(thread, turn + 1, areas[0].width as usize).len()
+                    })
                     .sum::<usize>()
             })
             .sum::<usize>();
@@ -232,8 +235,16 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
             index == app.context_cursor,
             areas[0].width as usize,
         ));
-        for thread in app.understanding_threads_at_context(index + 1) {
-            lines.extend(understanding_thread_box(thread, areas[0].width as usize));
+        for (turn, thread) in app
+            .understanding_threads_at_context(index + 1)
+            .into_iter()
+            .enumerate()
+        {
+            lines.extend(understanding_thread_box(
+                thread,
+                turn + 1,
+                areas[0].width as usize,
+            ));
         }
     }
     lines.truncate(height);
@@ -266,7 +277,7 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
     };
     let left = app.delivery_message.clone().unwrap_or_else(|| {
         format!(
-            "{} · {} · line {position}/{} · Q ask · [r/]r trail · b back",
+            "{} · {} · line {position}/{} · Q ask/follow-up · [r/]r trail · b back",
             app.context_path,
             app.context_version,
             app.context_lines.len()
@@ -291,13 +302,18 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
 
 fn understanding_thread_box(
     thread: &crate::app::UnderstandingThread,
+    turn: usize,
     width: usize,
 ) -> Vec<Line<'static>> {
     let content_width = width.saturating_sub(4).max(1);
     let mut lines = vec![Line::from(vec![
         Span::styled("  ? ", Style::default().fg(Color::Cyan)),
         Span::styled(
-            "YOU ASKED",
+            if turn == 1 {
+                "YOU ASKED".to_string()
+            } else {
+                format!("FOLLOW-UP {turn}")
+            },
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -1266,7 +1282,7 @@ mod tests {
             agent: "codex:session-1".into(),
             answer: Some("This is the shared request boundary.".into()),
         };
-        let text = understanding_thread_box(&thread, 60)
+        let text = understanding_thread_box(&thread, 1, 60)
             .iter()
             .map(Line::to_string)
             .collect::<Vec<_>>()

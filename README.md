@@ -145,6 +145,9 @@ inspection only—no file edits, formatting, commits, or pushes. The answer is
 shown below that source line and persisted with the review data. Press `s` to
 select a different Agent session. If the working tree changes during an
 understanding request, atig adds a visible safety warning to the answer.
+Press `Q` again on the same source line to ask a follow-up. atig includes up
+to the six most recent answered turns from that exact file version and line,
+so the Agent can continue the explanation without mixing in unrelated code.
 
 Context files are read-only. atig refuses files larger than 2 MiB and files
 that are not UTF-8 text.

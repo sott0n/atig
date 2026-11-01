@@ -10,6 +10,8 @@ use crate::git::{self, DiffEvent, HistoryEvent, HistoryLine};
 use crate::review_store::ReviewStore;
 
 const MAX_EVENTS_PER_TICK: usize = 256;
+const MAX_UNDERSTANDING_HISTORY: usize = 6;
+const MAX_UNDERSTANDING_MESSAGE_CHARS: usize = 4_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
@@ -1239,8 +1241,14 @@ impl App {
             return;
         };
         let line = self.context_cursor + 1;
-        let prompt =
-            format_understanding_request(&self.context_path, line, &question, &self.context_lines);
+        let previous = self.understanding_threads_at_context(line);
+        let prompt = format_understanding_request(
+            &self.context_path,
+            line,
+            &question,
+            &self.context_lines,
+            &previous,
+        );
         let thread_index = self.understanding_threads.len();
         self.understanding_threads.push(UnderstandingThread {
             source,
@@ -2136,17 +2144,49 @@ fn format_understanding_request(
     line: usize,
     question: &str,
     source: &[String],
+    previous: &[&UnderstandingThread],
 ) -> String {
     let start = line.saturating_sub(13);
     let end = line.saturating_add(12).min(source.len());
     let mut prompt = format!(
-        "Help a human understand the existing code at {file}:{line}. Answer the question using read-only inspection only. Do not edit, create, delete, or format files; do not commit or push. Explain the behavior and rationale from the code, cite repository-relative file:line locations for important claims, and say when something cannot be determined from the code.\n\nQuestion: {question}\n\nSelected source context:\n```text\n"
+        "Help a human understand the existing code at {file}:{line}. Answer the question using read-only inspection only. Do not edit, create, delete, or format files; do not commit or push. Explain the behavior and rationale from the code, cite repository-relative file:line locations for important claims, and say when something cannot be determined from the code.\n"
     );
+    let answered = previous
+        .iter()
+        .filter(|thread| thread.answer.is_some())
+        .rev()
+        .take(MAX_UNDERSTANDING_HISTORY)
+        .collect::<Vec<_>>();
+    if !answered.is_empty() {
+        prompt.push_str("\nPrevious conversation at this exact code location:\n");
+        for thread in answered.into_iter().rev() {
+            prompt.push_str(&format!(
+                "Human: {}\nAgent: {}\n",
+                truncate_for_prompt(&thread.question),
+                truncate_for_prompt(thread.answer.as_deref().unwrap_or_default())
+            ));
+        }
+    }
+    prompt.push_str(&format!(
+        "\nCurrent question: {}\n\nSelected source context:\n```text\n",
+        truncate_for_prompt(question)
+    ));
     for (index, text) in source.iter().enumerate().take(end).skip(start) {
         prompt.push_str(&format!("{:>6} {}\n", index + 1, text));
     }
     prompt.push_str("```\n");
     prompt
+}
+
+fn truncate_for_prompt(value: &str) -> String {
+    let mut text = value
+        .chars()
+        .take(MAX_UNDERSTANDING_MESSAGE_CHARS)
+        .collect::<String>();
+    if value.chars().count() > MAX_UNDERSTANDING_MESSAGE_CHARS {
+        text.push('…');
+    }
+    text
 }
 
 #[cfg(test)]
@@ -2841,14 +2881,48 @@ mod tests {
         let source = (1..=40)
             .map(|line| format!("line {line}"))
             .collect::<Vec<_>>();
-        let prompt =
-            format_understanding_request("src/main.rs", 20, "Why is this branch needed?", &source);
+        let prompt = format_understanding_request(
+            "src/main.rs",
+            20,
+            "Why is this branch needed?",
+            &source,
+            &[],
+        );
 
         assert!(prompt.contains("Do not edit, create, delete, or format files"));
         assert!(prompt.contains("src/main.rs:20"));
-        assert!(prompt.contains("Question: Why is this branch needed?"));
+        assert!(prompt.contains("Current question: Why is this branch needed?"));
         assert!(!prompt.contains("     1 line 1"));
         assert!(prompt.contains("    20 line 20"));
+    }
+
+    #[test]
+    fn understanding_follow_up_includes_only_recent_same_location_turns() {
+        let threads = (0..7)
+            .map(|turn| UnderstandingThread {
+                source: "WORKTREE".into(),
+                version: "WORKTREE".into(),
+                file: "src/main.rs".into(),
+                line: 20,
+                question: format!("question-{turn}"),
+                agent: "codex:session-1".into(),
+                answer: Some(format!("answer-{turn}")),
+            })
+            .collect::<Vec<_>>();
+        let previous = threads.iter().collect::<Vec<_>>();
+
+        let prompt = format_understanding_request(
+            "src/main.rs",
+            20,
+            "one more question",
+            &["selected".into()],
+            &previous,
+        );
+
+        assert!(!prompt.contains("question-0"));
+        assert!(prompt.contains("question-1"));
+        assert!(prompt.contains("answer-6"));
+        assert!(prompt.contains("Current question: one more question"));
     }
 
     #[test]
