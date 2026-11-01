@@ -107,6 +107,7 @@ the selected agent session.
 | `Tab`, `Shift-Tab` | Jump to the next or previous changed file |
 | `]c`, `[c` | Jump to the next or previous diff hunk |
 | `}`, `{` | Jump to the next or previous diff hunk |
+| `]i`, `[i` | Jump to the next or previous Agent Intent |
 | `/` | Search diff text |
 | `n`, `N` | Repeat the search forward or backward |
 | `a` | Add a comment to the selected diff line |
@@ -115,7 +116,8 @@ the selected agent session.
 | `C` | Add a comment for the whole commit |
 | `Enter` | Edit a review comment, or reply to a selected thread message |
 | `v` | Open the review comment list |
-| `t` | Open the changed-file navigator (`◆` Agent change, `●` review count) |
+| `t` | Open the changed-file navigator (`Δ` Agent change, `◆` Intent count, `●` review count) |
+| `i` | Show or hide Agent Intent cards |
 | `S` | Send the selected inline comment, or all comments when a code line is selected |
 | `X` | Open the working-tree diff produced by the last Agent run |
 | `s` | Open the repository agent-session picker |
@@ -198,6 +200,8 @@ change. Open the resulting working-tree diff with `X`; each reported intent is
 shown directly below its first added or modified line as `◆ AGENT INTENT`.
 atig only displays intentions explicitly returned by the Agent and does not
 guess when the response omits the intent manifest or returns a malformed one.
+Use `]i`/`[i` to jump between reported intentions, `i` to show or hide their
+inline cards, and `t` to see the Intent count for each changed file.
 Use `j`/`k` to select the Agent response, press `Enter` to write a follow-up,
 then press `S` on that thread to send the complete conversation context back
 to the selected Agent session.

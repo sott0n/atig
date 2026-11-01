@@ -34,6 +34,7 @@ pub enum View {
 pub enum DiffTarget {
     File,
     Change,
+    Intent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,6 +124,7 @@ pub struct DiffFileSummary {
     pub diff_index: usize,
     pub review_count: usize,
     pub agent_changed: bool,
+    pub intent_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,6 +155,7 @@ pub struct App {
     pub diff_thread_selected: Option<usize>,
     pub range_start: Option<usize>,
     pub diff_jump_direction: Option<isize>,
+    pub show_agent_intents: bool,
     pub comments: Vec<ReviewComment>,
     pub comment_buffer: String,
     pub comment_selected: usize,
@@ -208,6 +211,7 @@ impl App {
             diff_thread_selected: None,
             range_start: None,
             diff_jump_direction: None,
+            show_agent_intents: true,
             comments: Vec::new(),
             comment_buffer: String::new(),
             comment_selected: 0,
@@ -617,23 +621,27 @@ impl App {
         let Some(direction) = self.diff_jump_direction.take() else {
             return;
         };
-        let matches = |line: &&String| match target {
+        let intent_anchors = (target == DiffTarget::Intent).then(|| self.agent_intent_anchors());
+        let matches = |index: usize, line: &String| match target {
             DiffTarget::File => line.starts_with("diff --git "),
             DiffTarget::Change => line.starts_with("@@"),
+            DiffTarget::Intent => intent_anchors
+                .as_ref()
+                .is_some_and(|anchors| anchors.contains_key(&index)),
         };
         let destination = if direction > 0 {
             self.diff
                 .iter()
                 .enumerate()
                 .skip(self.diff_scroll.saturating_add(1))
-                .find(|(_, line)| matches(line))
+                .find(|(index, line)| matches(*index, line))
                 .map(|(index, _)| index)
         } else {
             self.diff[..self.diff_scroll.min(self.diff.len())]
                 .iter()
                 .enumerate()
                 .rev()
-                .find(|(_, line)| matches(line))
+                .find(|(index, line)| matches(*index, line))
                 .map(|(index, _)| index)
         };
 
@@ -644,6 +652,7 @@ impl App {
             let target = match target {
                 DiffTarget::File => "file",
                 DiffTarget::Change => "change",
+                DiffTarget::Intent => "Agent Intent",
             };
             self.message = format!("No {direction} {target}");
         }
@@ -652,6 +661,18 @@ impl App {
     pub fn jump_diff(&mut self, target: DiffTarget, direction: isize) {
         self.begin_diff_jump(direction);
         self.complete_diff_jump(target);
+    }
+
+    pub fn toggle_agent_intents(&mut self) {
+        self.show_agent_intents = !self.show_agent_intents;
+        self.message = format!(
+            "Agent Intents {}",
+            if self.show_agent_intents {
+                "shown"
+            } else {
+                "hidden"
+            }
+        );
     }
 
     pub fn go_to_diff_line(&mut self, line: usize) {
@@ -876,12 +897,24 @@ impl App {
     }
 
     pub fn diff_files(&self) -> Vec<DiffFileSummary> {
-        self.diff
+        let intent_anchors = self.agent_intent_anchors();
+        let file_starts = self
+            .diff
             .iter()
             .enumerate()
             .filter(|(_, line)| line.starts_with("diff --git "))
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        file_starts
+            .iter()
+            .enumerate()
             .filter_map(|(diff_index, _)| {
-                let (path, _) = diff_file_anchor(&self.diff, diff_index)?;
+                let start = file_starts[diff_index];
+                let end = file_starts
+                    .get(diff_index + 1)
+                    .copied()
+                    .unwrap_or(self.diff.len());
+                let (path, _) = diff_file_anchor(&self.diff, start)?;
                 let review_count = self
                     .comments
                     .iter()
@@ -896,8 +929,13 @@ impl App {
                         .iter()
                         .any(|changed| changed == &path),
                     path,
-                    diff_index,
+                    diff_index: start,
                     review_count,
+                    intent_count: intent_anchors
+                        .iter()
+                        .filter(|(index, _)| (start..end).contains(index))
+                        .map(|(_, intents)| intents.len())
+                        .sum(),
                 })
             })
             .collect()
@@ -2289,6 +2327,22 @@ mod tests {
                 intent: "Use the new behavior".into(),
             }])
         );
+
+        app.diff_scroll = 0;
+        app.jump_diff(DiffTarget::Intent, 1);
+        assert_eq!(app.diff_scroll, 4);
+        app.jump_diff(DiffTarget::Intent, 1);
+        assert_eq!(app.diff_scroll, 5);
+        app.jump_diff(DiffTarget::Intent, -1);
+        assert_eq!(app.diff_scroll, 4);
+
+        let files = app.diff_files();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].intent_count, 2);
+
+        app.toggle_agent_intents();
+        assert!(!app.show_agent_intents);
+        assert_eq!(app.message, "Agent Intents hidden");
     }
 
     #[test]

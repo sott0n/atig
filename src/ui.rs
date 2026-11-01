@@ -129,6 +129,7 @@ fn draw_help(frame: &mut Frame, areas: &[ratatui::layout::Rect]) {
         "Esc, q            back",
         "[f / ]f, Tab       previous / next file",
         "[c / ]c, { / }     previous / next change",
+        "[i / ]i            previous / next Agent Intent",
         ":goto <line>       jump to a diff line",
         "/, n, N           search / next / previous",
         "r                 reload",
@@ -140,6 +141,7 @@ fn draw_help(frame: &mut Frame, areas: &[ratatui::layout::Rect]) {
         "s                 select an agent session",
         "S                 send review comments",
         "X                 view Agent changes",
+        "i                 toggle Agent Intents",
         ":                 command",
         "?                 toggle this help",
     ]
@@ -171,13 +173,18 @@ fn draw_files(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
         .skip(start)
         .take(height)
         .map(|(index, file)| {
-            let marker = if file.agent_changed { "◆" } else { " " };
+            let changed = if file.agent_changed { "Δ " } else { "  " };
+            let intents = if file.intent_count == 0 {
+                String::new()
+            } else {
+                format!("  ◆{}", file.intent_count)
+            };
             let reviews = if file.review_count == 0 {
                 String::new()
             } else {
                 format!("  ●{}", file.review_count)
             };
-            let text = format!(" {marker} {}{reviews}", file.path);
+            let text = format!(" {changed}{}{intents}{reviews}", file.path);
             if index == app.file_selected {
                 let mut line = Line::styled(
                     text,
@@ -204,12 +211,13 @@ fn draw_files(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
         .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(Text::from(lines)), areas[0]);
     frame.render_widget(
-        Paragraph::new("◆ Agent changed  ● reviews  j/k move  Enter jump  q back").style(
-            Style::default()
-                .fg(Color::White)
-                .bg(Color::Blue)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Paragraph::new("Δ Agent changed  ◆ intents  ● reviews  j/k move  Enter jump  q back")
+            .style(
+                Style::default()
+                    .fg(Color::White)
+                    .bg(Color::Blue)
+                    .add_modifier(Modifier::BOLD),
+            ),
         areas[1],
     );
 }
@@ -401,7 +409,11 @@ fn draw_send_confirmation(frame: &mut Frame, app: &App, area: ratatui::layout::R
 fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
     let height = areas[0].height as usize;
     let commenting = app.input_mode == InputMode::Comment;
-    let intent_anchors = app.agent_intent_anchors();
+    let intent_anchors = if app.show_agent_intents {
+        app.agent_intent_anchors()
+    } else {
+        HashMap::new()
+    };
     let mut start = diff_viewport_start(app, height);
     let rows_before_selection = (start..app.diff_scroll)
         .map(|index| rendered_diff_row_height(app, index, areas[0].width as usize, &intent_anchors))

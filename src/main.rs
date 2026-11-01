@@ -216,6 +216,10 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 (KeyCode::Char('c'), KeyModifiers::NONE) => {
                     app.complete_diff_jump(DiffTarget::Change)
                 }
+                (KeyCode::Char('i'), KeyModifiers::NONE) if app.diff_jump_direction.is_some() => {
+                    app.complete_diff_jump(DiffTarget::Intent)
+                }
+                (KeyCode::Char('i'), KeyModifiers::NONE) => app.toggle_agent_intents(),
                 (KeyCode::Char('}'), _) => app.jump_diff(DiffTarget::Change, 1),
                 (KeyCode::Char('{'), _) => app.jump_diff(DiffTarget::Change, -1),
                 (KeyCode::Tab, _) => app.jump_diff(DiffTarget::File, 1),
