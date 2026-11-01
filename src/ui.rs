@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout},
@@ -6,7 +8,9 @@ use ratatui::{
     widgets::Paragraph,
 };
 
-use crate::app::{App, InputMode, ReviewComment, ReviewThreadRole, View};
+use crate::app::{
+    AgentIntent, App, InputMode, ReviewComment, ReviewThreadRole, View, visible_agent_response,
+};
 use crate::git::{CommitLine, HistoryLine, fit_column, format_refs};
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -397,9 +401,10 @@ fn draw_send_confirmation(frame: &mut Frame, app: &App, area: ratatui::layout::R
 fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
     let height = areas[0].height as usize;
     let commenting = app.input_mode == InputMode::Comment;
+    let intent_anchors = app.agent_intent_anchors();
     let mut start = diff_viewport_start(app, height);
     let rows_before_selection = (start..app.diff_scroll)
-        .map(|index| rendered_diff_row_height(app, index, areas[0].width as usize))
+        .map(|index| rendered_diff_row_height(app, index, areas[0].width as usize, &intent_anchors))
         .sum::<usize>();
     let selected_rows = 1 + if commenting { 3 } else { 0 };
     if rows_before_selection + selected_rows > height {
@@ -446,6 +451,9 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
                     areas[0].width as usize,
                 ));
             }
+        }
+        for intent in intent_anchors.get(&index).into_iter().flatten() {
+            lines.extend(agent_intent_box(intent, areas[0].width as usize));
         }
     }
     lines.truncate(height);
@@ -563,7 +571,12 @@ fn comments_for_diff_line(
         })
 }
 
-fn rendered_diff_row_height(app: &App, diff_index: usize, width: usize) -> usize {
+fn rendered_diff_row_height(
+    app: &App,
+    diff_index: usize,
+    width: usize,
+    intent_anchors: &HashMap<usize, Vec<AgentIntent>>,
+) -> usize {
     1 + comments_for_diff_line(app, diff_index)
         .map(|(comment_index, comment)| {
             saved_comment_box(
@@ -576,6 +589,36 @@ fn rendered_diff_row_height(app: &App, diff_index: usize, width: usize) -> usize
             .len()
         })
         .sum::<usize>()
+        + intent_anchors
+            .get(&diff_index)
+            .into_iter()
+            .flatten()
+            .map(|intent| agent_intent_box(intent, width).len())
+            .sum::<usize>()
+}
+
+fn agent_intent_box(intent: &AgentIntent, width: usize) -> Vec<Line<'static>> {
+    let content_width = width.saturating_sub(4).max(1);
+    let mut lines = vec![Line::from(vec![
+        Span::styled("  ◆ ", Style::default().fg(Color::Magenta)),
+        Span::styled(
+            "AGENT INTENT",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" · {}:{}", intent.file, intent.line),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ])];
+    for chunk in wrap_comment_body(&intent.intent, content_width) {
+        lines.push(Line::from(vec![
+            Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
+            Span::styled(chunk, Style::default().fg(Color::White)),
+        ]));
+    }
+    lines
 }
 
 fn saved_comment_box(
@@ -628,7 +671,7 @@ fn saved_comment_box(
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
         ]));
-        for chunk in wrap_comment_body(&message.body, content_width) {
+        for chunk in wrap_comment_body(visible_agent_response(&message.body), content_width) {
             lines.push(Line::from(vec![
                 Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
                 Span::styled(chunk, Style::default().fg(Color::White)),
@@ -1050,6 +1093,31 @@ mod tests {
         assert!(text.contains("AGENT · codex:session-1"));
         assert!(text.contains("Implemented."));
         assert!(text.contains("Tests pass."));
+    }
+
+    #[test]
+    fn agent_intent_uses_a_compact_card_and_manifest_stays_hidden() {
+        let intent = AgentIntent {
+            file: "src/main.rs".into(),
+            line: 12,
+            side: crate::app::AgentIntentSide::New,
+            intent: "Keep parsing separate from rendering".into(),
+        };
+        let rendered = agent_intent_box(&intent, 60);
+        let text = rendered
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("◆ AGENT INTENT · src/main.rs:12"));
+        assert!(text.contains("Keep parsing separate from rendering"));
+        assert_eq!(
+            visible_agent_response(
+                "Implemented.\n<atig-intents>\n[{\"file\":\"src/main.rs\"}]\n</atig-intents>"
+            ),
+            "Implemented."
+        );
     }
 
     #[test]

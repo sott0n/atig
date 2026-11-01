@@ -193,6 +193,11 @@ Sub-agent creation is ultimately controlled by the target agent and its
 configuration.
 
 After the CLI finishes, its response is appended to the inline review thread.
+For code changes, atig asks the Agent for a structured intent for each logical
+change. Open the resulting working-tree diff with `X`; each reported intent is
+shown directly below its first added or modified line as `◆ AGENT INTENT`.
+atig only displays intentions explicitly returned by the Agent and does not
+guess when the response omits the intent manifest or returns a malformed one.
 Use `j`/`k` to select the Agent response, press `Enter` to write a follow-up,
 then press `S` on that thread to send the complete conversation context back
 to the selected Agent session.

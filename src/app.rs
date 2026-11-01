@@ -1,4 +1,7 @@
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::{
+    collections::HashMap,
+    sync::mpsc::{self, Receiver, TryRecvError},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -43,6 +46,23 @@ pub enum ReviewThreadRole {
 pub struct ReviewThreadMessage {
     pub role: ReviewThreadRole,
     pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AgentIntent {
+    pub file: String,
+    pub line: usize,
+    #[serde(default)]
+    pub side: AgentIntentSide,
+    pub intent: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentIntentSide {
+    #[default]
+    New,
+    Old,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1109,8 +1129,7 @@ impl App {
                             self.last_agent_changes.join(", ")
                         )
                     };
-                    response.push_str("\n\n");
-                    response.push_str(&verification);
+                    append_before_intents(&mut response, &verification);
                 }
                 let agent = self
                     .dispatched_agent
@@ -1137,10 +1156,13 @@ impl App {
                     self.diff_comment_selected = Some(*index);
                     self.diff_thread_selected = self.comments[*index].thread.len().checked_sub(1);
                 }
+                let intent_count = parse_agent_intents(&response).len();
                 self.message = if attached == 1 {
-                    "Agent response received".into()
+                    format!("Agent response received · {intent_count} change intents")
                 } else {
-                    format!("Agent response attached to {attached} comments")
+                    format!(
+                        "Agent response attached to {attached} comments · {intent_count} change intents"
+                    )
                 };
                 self.delivery_message = Some(self.message.clone());
                 self.persist_reviews();
@@ -1181,6 +1203,66 @@ impl App {
             return;
         }
         self.open_worktree_diff();
+    }
+
+    pub fn agent_intent_anchors(&self) -> HashMap<usize, Vec<AgentIntent>> {
+        let intents = self
+            .comments
+            .iter()
+            .flat_map(|comment| &comment.thread)
+            .filter(|message| matches!(message.role, ReviewThreadRole::Agent(_)))
+            .flat_map(|message| parse_agent_intents(&message.body))
+            .fold(HashMap::new(), |mut by_location, intent| {
+                let entries = by_location
+                    .entry((intent.file.clone(), intent.line, intent.side))
+                    .or_insert_with(Vec::new);
+                if !entries.contains(&intent) {
+                    entries.push(intent);
+                }
+                by_location
+            });
+
+        let mut anchors = HashMap::new();
+        let mut file = None;
+        let mut old_line = 0usize;
+        let mut new_line = 0usize;
+        let mut in_hunk = false;
+        for (index, text) in self.diff.iter().enumerate() {
+            if let Some(path) = text.strip_prefix("+++ b/") {
+                file = Some(path.to_string());
+                continue;
+            }
+            if let Some((old, new)) = parse_hunk_start(text) {
+                old_line = old;
+                new_line = new;
+                in_hunk = true;
+                continue;
+            }
+            if !in_hunk || text.starts_with("\\ No newline") {
+                continue;
+            }
+            if text.starts_with('+') {
+                if let Some(entries) = file
+                    .as_ref()
+                    .and_then(|file| intents.get(&(file.clone(), new_line, AgentIntentSide::New)))
+                {
+                    anchors.insert(index, entries.clone());
+                }
+                new_line += 1;
+            } else if text.starts_with('-') {
+                if let Some(entries) = file
+                    .as_ref()
+                    .and_then(|file| intents.get(&(file.clone(), old_line, AgentIntentSide::Old)))
+                {
+                    anchors.insert(index, entries.clone());
+                }
+                old_line += 1;
+            } else if text.starts_with(' ') {
+                old_line += 1;
+                new_line += 1;
+            }
+        }
+        anchors
     }
 
     pub fn drain_diff_events(&mut self) -> bool {
@@ -1568,6 +1650,39 @@ fn changed_paths(before: &git::ChangeSnapshot, after: &git::ChangeSnapshot) -> V
         .collect()
 }
 
+const INTENTS_START: &str = "<atig-intents>";
+const INTENTS_END: &str = "</atig-intents>";
+
+pub fn visible_agent_response(body: &str) -> &str {
+    body.split_once(INTENTS_START)
+        .map(|(visible, _)| visible.trim_end())
+        .unwrap_or(body)
+}
+
+fn append_before_intents(body: &mut String, visible: &str) {
+    let insertion = body.find(INTENTS_START).unwrap_or(body.len());
+    let manifest = body.split_off(insertion);
+    body.truncate(body.trim_end().len());
+    if !body.is_empty() {
+        body.push_str("\n\n");
+    }
+    body.push_str(visible);
+    if !manifest.is_empty() {
+        body.push('\n');
+        body.push_str(&manifest);
+    }
+}
+
+fn parse_agent_intents(body: &str) -> Vec<AgentIntent> {
+    let Some((_, rest)) = body.split_once(INTENTS_START) else {
+        return Vec::new();
+    };
+    let Some((manifest, _)) = rest.split_once(INTENTS_END) else {
+        return Vec::new();
+    };
+    serde_json::from_str(manifest.trim()).unwrap_or_default()
+}
+
 fn scope_diff_index(diff: &[String], scope: &ReviewScope) -> Option<usize> {
     match scope {
         ReviewScope::Commit => (!diff.is_empty()).then(|| commit_comment_anchor(diff)),
@@ -1623,7 +1738,7 @@ fn parse_hunk_start(line: &str) -> Option<(usize, usize)> {
 
 fn format_review_request(comments: &[ReviewComment]) -> String {
     let mut prompt = String::from(
-        "Please address the following code review comments. Use a sub-agent for the implementation when your environment supports it. Inspect the current working tree before editing, make only the requested changes, and run relevant tests. Do not commit or push.\n\n",
+        "Please address the following code review comments. Use a sub-agent for the implementation when your environment supports it. Inspect the current working tree before editing, make only the requested changes, and run relevant tests. Do not commit or push.\n\nAfter your normal response, append a change-intent manifest in exactly this form, without a Markdown code fence:\n<atig-intents>\n[{\"file\":\"relative/path.rs\",\"line\":123,\"side\":\"new\",\"intent\":\"Why this logical change was made\"}]\n</atig-intents>\nUse repository-relative paths. Add one concise entry per logical change, anchored to its first added or modified post-change line with side \"new\". For a pure deletion, use the first deleted pre-change line with side \"old\". Use [] when you made no code changes.\n\n",
     );
     for (index, comment) in comments.iter().enumerate() {
         prompt.push_str(&format!(
@@ -2125,7 +2240,76 @@ mod tests {
         );
         assert_eq!(app.diff_comment_selected, Some(0));
         assert_eq!(app.diff_thread_selected, Some(0));
-        assert_eq!(app.message, "Agent response received");
+        assert_eq!(app.message, "Agent response received · 0 change intents");
+    }
+
+    #[test]
+    fn agent_intents_are_anchored_to_diff_sides_and_deduplicated() {
+        let mut app = App::new();
+        app.diff = vec![
+            "diff --git a/src/main.rs b/src/main.rs".into(),
+            "--- a/src/main.rs".into(),
+            "+++ b/src/main.rs".into(),
+            "@@ -1 +1 @@".into(),
+            "-old".into(),
+            "+new".into(),
+        ];
+        let comment = ReviewComment {
+            commit: "worktree".into(),
+            scope: ReviewScope::Line {
+                file: "src/main.rs".into(),
+                line: 1,
+            },
+            diff_index: 5,
+            body: "Update this".into(),
+            context: Vec::new(),
+            thread: vec![ReviewThreadMessage {
+                role: ReviewThreadRole::Agent("codex:session-1".into()),
+                body: "Done.\n<atig-intents>\n[{\"file\":\"src/main.rs\",\"line\":1,\"side\":\"old\",\"intent\":\"Remove the obsolete behavior\"},{\"file\":\"src/main.rs\",\"line\":1,\"side\":\"new\",\"intent\":\"Use the new behavior\"}]\n</atig-intents>".into(),
+            }],
+        };
+        app.comments = vec![comment.clone(), comment];
+
+        let anchors = app.agent_intent_anchors();
+        assert_eq!(
+            anchors.get(&4),
+            Some(&vec![AgentIntent {
+                file: "src/main.rs".into(),
+                line: 1,
+                side: AgentIntentSide::Old,
+                intent: "Remove the obsolete behavior".into(),
+            }])
+        );
+        assert_eq!(
+            anchors.get(&5),
+            Some(&vec![AgentIntent {
+                file: "src/main.rs".into(),
+                line: 1,
+                side: AgentIntentSide::New,
+                intent: "Use the new behavior".into(),
+            }])
+        );
+    }
+
+    #[test]
+    fn malformed_intent_manifest_is_ignored_and_hidden_from_the_reply() {
+        let response = "Done.\n<atig-intents>\nnot-json\n</atig-intents>";
+
+        assert!(parse_agent_intents(response).is_empty());
+        assert_eq!(visible_agent_response(response), "Done.");
+    }
+
+    #[test]
+    fn verification_is_inserted_before_the_hidden_intent_manifest() {
+        let mut response = "Done.\n<atig-intents>\n[]\n</atig-intents>".to_string();
+
+        append_before_intents(&mut response, "Verification: changed one file.");
+
+        assert_eq!(
+            visible_agent_response(&response),
+            "Done.\n\nVerification: changed one file."
+        );
+        assert!(parse_agent_intents(&response).is_empty());
     }
 
     #[test]
