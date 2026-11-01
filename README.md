@@ -152,6 +152,13 @@ common declaration forms while retaining every match for languages it cannot
 classify. Select a result with `Enter`; symbol jumps participate in
 `Ctrl-o`/`Ctrl-i` context history.
 
+Press `I` to map the selected symbol's impact surface. The result view groups
+whole-word matches as changed lines, definitions, tests, calls, and other
+references, then orders the locations by reading priority. This classification
+is deterministic and language-agnostic: it uses the current diff, common
+declaration and call forms, and test paths without asking an Agent or changing
+the working tree.
+
 Press `*` to search for literal text across the repository version currently
 being reviewed. Results stream into a Vim-style picker; use `j`/`k` and
 `Enter` to open a match, or `q` to return. Commit diffs search that commit (or

@@ -50,6 +50,16 @@ pub enum RepositorySearchKind {
     Text,
     Definition,
     References,
+    Impact,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ImpactKind {
+    Changed,
+    Definition,
+    Test,
+    Call,
+    Reference,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -275,6 +285,7 @@ pub struct App {
     pub repository_search_selected: usize,
     pub repository_search_loading: bool,
     pub repository_search_kind: RepositorySearchKind,
+    repository_impact_kinds: HashMap<(String, usize), ImpactKind>,
     pub sessions: Vec<AgentSession>,
     pub session_selected: usize,
     pub sessions_loading: bool,
@@ -359,6 +370,7 @@ impl App {
             repository_search_selected: 0,
             repository_search_loading: false,
             repository_search_kind: RepositorySearchKind::Text,
+            repository_impact_kinds: HashMap::new(),
             sessions: Vec::new(),
             session_selected: 0,
             sessions_loading: false,
@@ -705,6 +717,7 @@ impl App {
         self.repository_search_rx = Some(rx);
         self.repository_search_query = query.clone();
         self.repository_search_results.clear();
+        self.repository_impact_kinds.clear();
         self.repository_search_selected = 0;
         self.repository_search_loading = true;
         self.repository_search_kind = kind;
@@ -715,6 +728,7 @@ impl App {
                 format!("Finding definition candidates for {query}...")
             }
             RepositorySearchKind::References => format!("Finding references to {query}..."),
+            RepositorySearchKind::Impact => format!("Mapping impact of {query}..."),
         };
     }
 
@@ -738,6 +752,26 @@ impl App {
                         let symbol = self.repository_search_query.clone();
                         self.repository_search_results.sort_by_key(|found| {
                             definition_candidate_score(found, &symbol, &current_path)
+                        });
+                    } else if self.repository_search_kind == RepositorySearchKind::Impact {
+                        let changed = changed_locations(&self.diff, self.context_side);
+                        let symbol = self.repository_search_query.clone();
+                        self.repository_impact_kinds = self
+                            .repository_search_results
+                            .iter()
+                            .map(|found| {
+                                (
+                                    (found.path.clone(), found.line),
+                                    classify_impact(found, &symbol, &changed),
+                                )
+                            })
+                            .collect();
+                        let impacts = &self.repository_impact_kinds;
+                        self.repository_search_results.sort_by_key(|found| {
+                            impacts
+                                .get(&(found.path.clone(), found.line))
+                                .copied()
+                                .unwrap_or(ImpactKind::Reference)
                         });
                     }
                     self.message = format!(
@@ -769,6 +803,20 @@ impl App {
                 .saturating_add(amount as usize)
                 .min(self.repository_search_results.len().saturating_sub(1));
         }
+    }
+
+    pub fn repository_result_impact(&self, found: &SearchMatch) -> Option<ImpactKind> {
+        self.repository_impact_kinds
+            .get(&(found.path.clone(), found.line))
+            .copied()
+    }
+
+    pub fn impact_counts(&self) -> [usize; 5] {
+        let mut counts = [0; 5];
+        for impact in self.repository_impact_kinds.values() {
+            counts[*impact as usize] += 1;
+        }
+        counts
     }
 
     pub fn close_repository_search(&mut self) {
@@ -2682,8 +2730,15 @@ fn is_code_keyword(symbol: &str) -> bool {
 }
 
 fn definition_candidate_score(found: &SearchMatch, symbol: &str, current_path: &str) -> (u8, u8) {
-    let trimmed = found.text.trim_start();
-    let declaration = [
+    (
+        u8::from(!is_definition_candidate(&found.text, symbol)),
+        u8::from(found.path.as_str() != current_path),
+    )
+}
+
+fn is_definition_candidate(text: &str, symbol: &str) -> bool {
+    let trimmed = text.trim_start();
+    [
         "fn ",
         "struct ",
         "enum ",
@@ -2700,11 +2755,87 @@ fn definition_candidate_score(found: &SearchMatch, symbol: &str, current_path: &
         "var ",
     ]
     .iter()
-    .any(|keyword| trimmed.contains(&format!("{keyword}{symbol}")));
-    (
-        u8::from(!declaration),
-        u8::from(found.path.as_str() != current_path),
-    )
+    .any(|keyword| trimmed.contains(&format!("{keyword}{symbol}")))
+}
+
+fn classify_impact(
+    found: &SearchMatch,
+    symbol: &str,
+    changed: &BTreeSet<(String, usize)>,
+) -> ImpactKind {
+    if changed.contains(&(found.path.clone(), found.line)) {
+        ImpactKind::Changed
+    } else if is_definition_candidate(&found.text, symbol) {
+        ImpactKind::Definition
+    } else if is_test_path(&found.path) {
+        ImpactKind::Test
+    } else if is_call_candidate(&found.text, symbol) {
+        ImpactKind::Call
+    } else {
+        ImpactKind::Reference
+    }
+}
+
+fn is_test_path(path: &str) -> bool {
+    path.split('/').any(|component| {
+        component == "test"
+            || component == "tests"
+            || component == "spec"
+            || component == "specs"
+            || component.contains("_test.")
+            || component.contains(".test.")
+            || component.contains("_spec.")
+            || component.contains(".spec.")
+    })
+}
+
+fn is_call_candidate(text: &str, symbol: &str) -> bool {
+    text.match_indices(symbol)
+        .any(|(index, _)| text[index + symbol.len()..].trim_start().starts_with('('))
+}
+
+fn changed_locations(diff: &[String], side: git::DiffSide) -> BTreeSet<(String, usize)> {
+    let mut old_file = None;
+    let mut new_file = None;
+    let mut old_line = 0usize;
+    let mut new_line = 0usize;
+    let mut in_hunk = false;
+    let mut changed = BTreeSet::new();
+    for text in diff {
+        if text.starts_with("diff --git ") {
+            old_file = None;
+            new_file = None;
+            in_hunk = false;
+        } else if let Some(file) = text.strip_prefix("--- a/") {
+            old_file = Some(file.to_string());
+        } else if let Some(file) = text.strip_prefix("+++ b/") {
+            new_file = Some(file.to_string());
+        } else if let Some((old, new)) = parse_hunk_start(text) {
+            old_line = old;
+            new_line = new;
+            in_hunk = true;
+        } else if in_hunk && !text.starts_with("\\ No newline") {
+            if text.starts_with('+') {
+                if side == git::DiffSide::New
+                    && let Some(file) = &new_file
+                {
+                    changed.insert((file.clone(), new_line));
+                }
+                new_line += 1;
+            } else if text.starts_with('-') {
+                if side == git::DiffSide::Old
+                    && let Some(file) = &old_file
+                {
+                    changed.insert((file.clone(), old_line));
+                }
+                old_line += 1;
+            } else if text.starts_with(' ') {
+                old_line += 1;
+                new_line += 1;
+            }
+        }
+    }
+    changed
 }
 
 fn diff_location(diff: &[String], cursor: usize) -> Option<(String, usize)> {
@@ -3287,6 +3418,69 @@ mod tests {
             .sort_by_key(|found| definition_candidate_score(found, "render_widget", "src/use.rs"));
 
         assert_eq!(matches[0].path, "src/ui.rs");
+    }
+
+    #[test]
+    fn impact_map_classifies_changed_definitions_tests_calls_and_references() {
+        let changed = BTreeSet::from([("src/lib.rs".into(), 4)]);
+        let cases = [
+            (
+                "src/lib.rs",
+                4,
+                "render_widget(frame);",
+                ImpactKind::Changed,
+            ),
+            (
+                "src/ui.rs",
+                8,
+                "pub fn render_widget(frame: Frame) {",
+                ImpactKind::Definition,
+            ),
+            (
+                "tests/ui_test.rs",
+                12,
+                "render_widget(frame);",
+                ImpactKind::Test,
+            ),
+            ("src/app.rs", 16, "render_widget(frame);", ImpactKind::Call),
+            (
+                "src/state.rs",
+                20,
+                "callback: render_widget,",
+                ImpactKind::Reference,
+            ),
+        ];
+
+        for (path, line, text, expected) in cases {
+            let found = SearchMatch {
+                path: path.into(),
+                line,
+                text: text.into(),
+            };
+            assert_eq!(classify_impact(&found, "render_widget", &changed), expected);
+        }
+    }
+
+    #[test]
+    fn changed_locations_follow_the_selected_diff_side() {
+        let diff = vec![
+            "diff --git a/src/lib.rs b/src/lib.rs".into(),
+            "--- a/src/lib.rs".into(),
+            "+++ b/src/lib.rs".into(),
+            "@@ -3,2 +8,2 @@".into(),
+            "-old render_widget".into(),
+            "+new render_widget".into(),
+            " context".into(),
+        ];
+
+        assert_eq!(
+            changed_locations(&diff, git::DiffSide::Old),
+            BTreeSet::from([("src/lib.rs".into(), 3)])
+        );
+        assert_eq!(
+            changed_locations(&diff, git::DiffSide::New),
+            BTreeSet::from([("src/lib.rs".into(), 8)])
+        );
     }
 
     #[test]

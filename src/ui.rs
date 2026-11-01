@@ -9,8 +9,8 @@ use ratatui::{
 };
 
 use crate::app::{
-    AgentIntent, App, InputMode, RepositorySearchKind, ReviewComment, ReviewThreadRole, View,
-    visible_agent_response,
+    AgentIntent, App, ImpactKind, InputMode, RepositorySearchKind, ReviewComment, ReviewThreadRole,
+    View, visible_agent_response,
 };
 use crate::git::{CommitLine, HistoryLine, fit_column, format_refs};
 
@@ -150,6 +150,7 @@ fn draw_help(frame: &mut Frame, areas: &[ratatui::layout::Rect]) {
         "m, [m / ]m        toggle / visit code bookmarks",
         "w / W             next / previous symbol on line",
         "gd / gr           symbol definitions / references",
+        "I                 map selected symbol impact",
         "Ctrl-o / Ctrl-i    older / newer context location",
         "Q                 ask Agent about context line",
         "V, move, Q        ask Agent about a code range",
@@ -333,7 +334,7 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
             format!("VISUAL LINES {start}-{end} · Q ask range · V/Esc cancel")
         } else {
             format!(
-                "{} · {} · line {position}/{} · {} · w/W symbol · gd definition · gr references · ◆{} · m mark · / file · * repo · b diff",
+                "{} · {} · line {position}/{} · {} · w/W symbol · gd def · gr refs · I impact · ◆{} · m mark · / file · b diff",
                 app.context_path,
                 app.context_version,
                 app.context_lines.len(),
@@ -791,14 +792,26 @@ fn draw_repository_search(frame: &mut Frame, app: &App, areas: &[ratatui::layout
         .skip(start)
         .take(height)
         .map(|(index, found)| {
-            let spans = vec![
+            let mut spans = Vec::new();
+            if let Some(impact) = app.repository_result_impact(found) {
+                let (label, color) = impact_style(impact);
+                spans.push(Span::styled(
+                    format!(" {label:<7} "),
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(color)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::raw(" "));
+            }
+            spans.extend([
                 Span::styled(found.path.clone(), Style::default().fg(Color::Cyan)),
                 Span::styled(
                     format!(":{} ", found.line),
                     Style::default().fg(Color::Yellow),
                 ),
                 Span::raw(found.text.trim().to_string()),
-            ];
+            ]);
             let mut line = Line::from(spans);
             if index == app.repository_search_selected {
                 line = line.style(
@@ -828,12 +841,21 @@ fn draw_repository_search(frame: &mut Frame, app: &App, areas: &[ratatui::layout
         RepositorySearchKind::Text => "repo search",
         RepositorySearchKind::Definition => "definitions",
         RepositorySearchKind::References => "references",
+        RepositorySearchKind::Impact => "impact map",
     };
-    let left = format!(
-        "{search_label} '{}' · {} matches · {state}",
-        app.repository_search_query,
-        app.repository_search_results.len()
-    );
+    let left = if app.repository_search_kind == RepositorySearchKind::Impact {
+        let [changed, definitions, tests, calls, references] = app.impact_counts();
+        format!(
+            "{search_label} '{}' · Δ{changed} def {definitions} calls {calls} tests {tests} refs {references} · {state}",
+            app.repository_search_query
+        )
+    } else {
+        format!(
+            "{search_label} '{}' · {} matches · {state}",
+            app.repository_search_query,
+            app.repository_search_results.len()
+        )
+    };
     let right = "j/k move  Enter open  q back";
     let gap = (areas[1].width as usize).saturating_sub(left.chars().count() + right.len());
     frame.render_widget(
@@ -845,6 +867,16 @@ fn draw_repository_search(frame: &mut Frame, app: &App, areas: &[ratatui::layout
         ),
         areas[1],
     );
+}
+
+fn impact_style(impact: ImpactKind) -> (&'static str, Color) {
+    match impact {
+        ImpactKind::Changed => ("CHANGED", Color::Magenta),
+        ImpactKind::Definition => ("DEF", Color::Cyan),
+        ImpactKind::Test => ("TEST", Color::Yellow),
+        ImpactKind::Call => ("CALL", Color::Green),
+        ImpactKind::Reference => ("REF", Color::DarkGray),
+    }
 }
 
 fn draw_comments(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {

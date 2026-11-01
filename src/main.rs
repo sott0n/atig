@@ -232,6 +232,9 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 }
                 (KeyCode::Char('w'), KeyModifiers::NONE) => app.move_context_symbol(1),
                 (KeyCode::Char('W'), KeyModifiers::SHIFT) => app.move_context_symbol(-1),
+                (KeyCode::Char('I'), KeyModifiers::SHIFT) => {
+                    app.search_context_symbol(RepositorySearchKind::Impact)
+                }
                 (KeyCode::Char('G'), KeyModifiers::SHIFT) | (KeyCode::End, _) => {
                     app.select_context_end()
                 }
