@@ -140,6 +140,7 @@ fn draw_help(frame: &mut Frame, areas: &[ratatui::layout::Rect]) {
         "Ctrl-o / Ctrl-i    older / newer context location",
         "Q                 ask Agent about context line",
         "R                 build an Agent reading path",
+        "T                 expand / collapse reading path",
         ":goto <line>       jump to a diff line",
         "/, n, N           search / next / previous",
         "r                 reload",
@@ -173,9 +174,9 @@ fn draw_help(frame: &mut Frame, areas: &[ratatui::layout::Rect]) {
 
 fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
     let height = areas[0].height as usize;
-    let trail_header = if let Some(point) = app.current_reading_point() {
+    let mut trail_header = if let Some(point) = app.current_reading_point() {
         let position = app.context_reading_index.unwrap_or(0) + 1;
-        Some(Line::from(vec![
+        vec![Line::from(vec![
             Span::styled(" ◆ ", Style::default().fg(Color::Magenta)),
             Span::styled(
                 format!("READ {position}/{}", app.context_reading_path.len()),
@@ -184,32 +185,42 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!(" · {} · {}", reading_point_location(point), point.reason),
+                format!(
+                    " · {}/{} visited · {} · {}",
+                    app.context_reading_visited.len(),
+                    app.context_reading_path.len(),
+                    reading_point_location(point),
+                    point.reason
+                ),
                 Style::default().fg(Color::White),
             ),
-        ]))
+        ])]
     } else if !app.context_reading_path.is_empty() {
-        Some(Line::from(vec![
+        vec![Line::from(vec![
             Span::styled(" ◆ ", Style::default().fg(Color::Magenta)),
             Span::styled(
                 format!(
-                    "READING TRAIL · {} locations · ]r start",
-                    app.context_reading_path.len()
+                    "READING TRAIL · {}/{} visited · ]r start · T list",
+                    app.context_reading_visited.len(),
+                    app.context_reading_path.len(),
                 ),
                 Style::default()
                     .fg(Color::Magenta)
                     .add_modifier(Modifier::BOLD),
             ),
-        ]))
+        ])]
     } else {
-        None
+        Vec::new()
     };
-    let source_height = height.saturating_sub(usize::from(trail_header.is_some()));
+    if app.show_context_reading_trail {
+        trail_header.extend(reading_trail_lines(app));
+    }
+    let source_height = height.saturating_sub(trail_header.len());
     let mut start = app
         .context_cursor
         .saturating_sub((source_height / 4).max(1))
         .min(app.context_lines.len().saturating_sub(source_height));
-    let rows_before_selection = usize::from(trail_header.is_some())
+    let rows_before_selection = trail_header.len()
         + (start..app.context_cursor)
             .map(|index| {
                 1 + app
@@ -226,7 +237,7 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
         start = app.context_cursor;
     }
     let number_width = app.context_lines.len().max(1).to_string().len();
-    let mut lines = trail_header.into_iter().collect::<Vec<_>>();
+    let mut lines = trail_header;
     for (index, text) in app.context_lines.iter().enumerate().skip(start) {
         if lines.len() >= height {
             break;
@@ -281,7 +292,7 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
     };
     let left = app.delivery_message.clone().unwrap_or_else(|| {
         format!(
-            "{} · {} · line {position}/{} · Q ask · R guide · [c/]c changes · [r/]r trail · ^o/^i history · b diff",
+            "{} · {} · line {position}/{} · Q ask · R guide · T trail · [c/]c changes · [r/]r trail · ^o/^i history · b diff",
             app.context_path,
             app.context_version,
             app.context_lines.len()
@@ -375,6 +386,39 @@ fn reading_point_location(point: &crate::app::AgentReadingPoint) -> String {
     } else {
         format!("{} · {}:{}", point.symbol, point.file, point.line)
     }
+}
+
+fn reading_trail_lines(app: &App) -> Vec<Line<'static>> {
+    app.context_reading_path
+        .iter()
+        .enumerate()
+        .map(|(index, point)| {
+            let current = app.context_reading_index == Some(index);
+            let visited = app.context_reading_visited.contains(&index);
+            let (marker, color) = if current {
+                ('●', Color::Cyan)
+            } else if visited {
+                ('✓', Color::Green)
+            } else {
+                ('○', Color::DarkGray)
+            };
+            Line::from(vec![
+                Span::styled(format!("   {marker} "), Style::default().fg(color)),
+                Span::styled(
+                    format!("{} ", index + 1),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    reading_point_location(point),
+                    Style::default().fg(Color::White),
+                ),
+                Span::styled(
+                    format!(" · {}", point.reason),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ])
+        })
+        .collect()
 }
 
 fn source_line(
@@ -1320,6 +1364,27 @@ mod tests {
 
         assert!(rendered.to_string().starts_with("+ 12 │"));
         assert_eq!(rendered.spans[0].style.fg, Some(Color::Green));
+    }
+
+    #[test]
+    fn reading_trail_distinguishes_current_visited_and_unread_locations() {
+        let mut app = App::new();
+        app.context_reading_path = (1..=3)
+            .map(|line| crate::app::AgentReadingPoint {
+                file: "src/main.rs".into(),
+                line,
+                symbol: format!("step_{line}"),
+                reason: format!("Read step {line}"),
+            })
+            .collect();
+        app.context_reading_index = Some(1);
+        app.context_reading_visited.extend([0, 1]);
+
+        let rendered = reading_trail_lines(&app);
+
+        assert!(rendered[0].to_string().contains('✓'));
+        assert!(rendered[1].to_string().contains('●'));
+        assert!(rendered[2].to_string().contains('○'));
     }
 
     #[test]

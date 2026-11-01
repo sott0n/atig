@@ -205,6 +205,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 }
                 (KeyCode::Char('Q'), KeyModifiers::SHIFT) => app.start_understanding_question(),
                 (KeyCode::Char('R'), KeyModifiers::SHIFT) => app.request_guided_reading(),
+                (KeyCode::Char('T'), KeyModifiers::SHIFT) => app.toggle_context_reading_trail(),
                 (KeyCode::Char('s'), KeyModifiers::NONE) => app.open_sessions(),
                 (KeyCode::Char('?'), _) => app.open_help(),
                 _ => {

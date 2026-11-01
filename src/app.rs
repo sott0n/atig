@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     sync::mpsc::{self, Receiver, TryRecvError},
 };
 
@@ -210,6 +210,8 @@ pub struct App {
     context_forward_stack: Vec<ContextLocation>,
     pub context_reading_path: Vec<AgentReadingPoint>,
     pub context_reading_index: Option<usize>,
+    pub context_reading_visited: BTreeSet<usize>,
+    pub show_context_reading_trail: bool,
     pub context_jump_direction: Option<isize>,
     pub understanding_threads: Vec<UnderstandingThread>,
     pub question_buffer: String,
@@ -280,6 +282,8 @@ impl App {
             context_forward_stack: Vec::new(),
             context_reading_path: Vec::new(),
             context_reading_index: None,
+            context_reading_visited: BTreeSet::new(),
+            show_context_reading_trail: false,
             context_jump_direction: None,
             understanding_threads: Vec::new(),
             question_buffer: String::new(),
@@ -1115,6 +1119,8 @@ impl App {
         if self.load_context_file(&path, line, side) {
             self.context_reading_path = reading_path;
             self.context_reading_index = None;
+            self.context_reading_visited.clear();
+            self.show_context_reading_trail = false;
             self.context_jump_direction = None;
             self.context_back_stack.clear();
             self.context_forward_stack.clear();
@@ -1192,7 +1198,10 @@ impl App {
             .map(|thread| thread.references.clone())
             .unwrap_or_default();
         if !references.is_empty() {
-            self.context_reading_path = references;
+            if self.context_reading_path != references {
+                self.context_reading_path = references;
+                self.context_reading_visited.clear();
+            }
             self.context_reading_index = None;
         }
         self.context_jump_direction = Some(direction.signum());
@@ -1226,6 +1235,7 @@ impl App {
         let origin = self.current_context_location();
         if self.load_context_file(&point.file, point.line, git::DiffSide::New) {
             self.context_reading_index = Some(destination);
+            self.context_reading_visited.insert(destination);
             if let Some(origin) = origin {
                 self.context_back_stack.push(origin);
             }
@@ -1316,6 +1326,19 @@ impl App {
     pub fn current_reading_point(&self) -> Option<&AgentReadingPoint> {
         self.context_reading_index
             .and_then(|index| self.context_reading_path.get(index))
+    }
+
+    pub fn toggle_context_reading_trail(&mut self) {
+        if self.context_reading_path.is_empty() {
+            self.message = "No reading trail for this change".into();
+            return;
+        }
+        self.show_context_reading_trail = !self.show_context_reading_trail;
+        self.message = if self.show_context_reading_trail {
+            "Reading Trail expanded".into()
+        } else {
+            "Reading Trail collapsed".into()
+        };
     }
 
     pub fn start_understanding_question(&mut self) {
@@ -1581,6 +1604,8 @@ impl App {
                     if active_context && !references.is_empty() {
                         self.context_reading_path = references;
                         self.context_reading_index = None;
+                        self.context_reading_visited.clear();
+                        self.show_context_reading_trail = true;
                     }
                     self.dispatched_agent = None;
                     self.dispatched_comments.clear();
@@ -3040,7 +3065,10 @@ mod tests {
         app.complete_context_reading_jump();
         assert_eq!(app.context_path, "Cargo.toml");
         assert_eq!(app.context_reading_index, Some(0));
+        assert_eq!(app.context_reading_visited, BTreeSet::from([0]));
         assert_eq!(app.message, "Read: Understand the crate context");
+        app.toggle_context_reading_trail();
+        assert!(app.show_context_reading_trail);
         app.context_history_back();
         assert_eq!(app.context_path, "src/main.rs");
         assert_eq!(app.context_cursor, 0);
