@@ -1144,6 +1144,12 @@ impl App {
                 };
                 self.delivery_message = Some(self.message.clone());
                 self.persist_reviews();
+                if matches!(
+                    self.diff_source,
+                    Some(git::DiffSource::Worktree | git::DiffSource::Staged)
+                ) {
+                    self.reload_diff();
+                }
             }
             DispatchEvent::Error(error) => {
                 self.dispatch_rx = None;

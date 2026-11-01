@@ -135,9 +135,8 @@ the selected agent session.
 | `s` | Open the repository agent-session picker |
 | `Esc`, `q` | Return to the diff |
 
-Comments are anchored to the selected commit, file, and diff line. They are
-kept in memory for the current `atig` process together with any captured agent
-response; quitting the application discards them.
+Comments are anchored to a commit, file, line, or line range. Review threads
+and captured Agent responses are persisted under `.git/atig/`.
 
 ## Commands
 
@@ -185,8 +184,9 @@ Git revision arguments are passed directly to `git log`. For example:
 
 When an inline comment is selected, `S` sends that comment alone. When a code
 line is selected, `S` sends all accumulated comments as one review request.
-Comments can target a specific line (`a`), the current file (`F`), or the
-whole commit (`C`); that scope is included explicitly in the Agent request.
+Comments can target a specific line (`a`), a line range (`V`, move, `a`), the
+current file (`F`), or the whole commit (`C`); that scope is included
+explicitly in the Agent request together with bounded diff context.
 The request asks the target agent to use a sub-agent when supported, make only
 the reviewed changes, run relevant tests, and avoid committing or pushing.
 Sub-agent creation is ultimately controlled by the target agent and its
@@ -231,8 +231,6 @@ still streamed; there is no artificial commit limit.
 
 ## Current limitations
 
-- Only committed changes can be reviewed; working-tree and staged diffs do not
-  yet have dedicated views.
 - Claude's non-interactive CLI may buffer output even though atig consumes
   Agent output incrementally.
 - The generic `other` agent adapter is not implemented.
@@ -254,6 +252,7 @@ The source is split by responsibility:
 - `src/app.rs`: application state, navigation, comments, and commands
 - `src/ui.rs`: `ratatui` rendering and colors
 - `src/agent.rs`: validated session targets and delivery adapters
+- `src/review_store.rs`: repository-local review thread persistence
 - `src/main.rs`: terminal lifecycle and key event routing
 
 ## License
