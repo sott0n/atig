@@ -6,13 +6,15 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::app::{ReviewComment, UnderstandingThread};
+use crate::app::{ContextBookmark, ReviewComment, UnderstandingThread};
 
 #[derive(Default, Serialize, Deserialize)]
 pub struct ReviewData {
     pub comments: Vec<ReviewComment>,
     #[serde(default)]
     pub understanding_threads: Vec<UnderstandingThread>,
+    #[serde(default)]
+    pub context_bookmarks: Vec<ContextBookmark>,
 }
 
 #[derive(Deserialize)]
@@ -57,6 +59,7 @@ impl ReviewStore {
             StoredReviewData::Legacy(comments) => ReviewData {
                 comments,
                 understanding_threads: Vec::new(),
+                context_bookmarks: Vec::new(),
             },
         })
     }
@@ -65,6 +68,7 @@ impl ReviewStore {
         &self,
         comments: &[ReviewComment],
         understanding_threads: &[UnderstandingThread],
+        context_bookmarks: &[ContextBookmark],
     ) -> Result<(), String> {
         let parent = self
             .path
@@ -76,6 +80,7 @@ impl ReviewStore {
         let contents = serde_json::to_vec_pretty(&ReviewData {
             comments: comments.to_vec(),
             understanding_threads: understanding_threads.to_vec(),
+            context_bookmarks: context_bookmarks.to_vec(),
         })
         .map_err(|error| format!("Cannot encode reviews: {error}"))?;
         fs::write(&temporary, contents)
@@ -92,7 +97,10 @@ fn temporary_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{ReviewScope, ReviewThreadMessage, ReviewThreadRole, UnderstandingThread};
+    use crate::app::{
+        AgentIntentSide, ContextBookmark, ReviewScope, ReviewThreadMessage, ReviewThreadRole,
+        UnderstandingThread,
+    };
 
     #[test]
     fn round_trips_review_threads() {
@@ -123,21 +131,33 @@ mod tests {
             answer: Some("Because.".into()),
             references: Vec::new(),
         }];
+        let context_bookmarks = vec![ContextBookmark {
+            source: "WORKTREE".into(),
+            version: "WORKTREE".into(),
+            file: "src/main.rs".into(),
+            line: 12,
+            side: AgentIntentSide::New,
+        }];
 
-        store.save(&comments, &understanding_threads).unwrap();
+        store
+            .save(&comments, &understanding_threads, &context_bookmarks)
+            .unwrap();
         let loaded = store.load().unwrap();
         assert_eq!(loaded.comments, comments);
         assert_eq!(loaded.understanding_threads, understanding_threads);
+        assert_eq!(loaded.context_bookmarks, context_bookmarks);
 
         let legacy_thread = r#"{"comments":[],"understanding_threads":[{"source":"WORKTREE","version":"WORKTREE","file":"src/main.rs","line":8,"question":"Why?","agent":"codex:session","answer":null,"references":[]}]}"#;
         fs::write(&store.path, legacy_thread).unwrap();
         let loaded = store.load().unwrap();
         assert_eq!(loaded.understanding_threads[0].end_line, None);
+        assert!(loaded.context_bookmarks.is_empty());
 
         fs::write(&store.path, serde_json::to_vec(&comments).unwrap()).unwrap();
         let legacy = store.load().unwrap();
         assert_eq!(legacy.comments, comments);
         assert!(legacy.understanding_threads.is_empty());
+        assert!(legacy.context_bookmarks.is_empty());
 
         fs::remove_dir_all(root).unwrap();
     }

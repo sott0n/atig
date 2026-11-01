@@ -191,6 +191,13 @@ code location and `Ctrl-i` to move forward again. Because many terminals send
 `Ctrl-i` as `Tab`, `Tab` is accepted as the forward action. This history is
 separate from `b`, which returns directly to the original diff.
 
+Press `m` to bookmark a source line while reading. Bookmarked lines have a
+cyan `◆` in the gutter; use `]m` and `[m` to cycle through all bookmarks for
+the commit, index, or working-tree review currently open. Bookmark jumps can
+cross files and participate in `Ctrl-o`/`Ctrl-i` history. Bookmarks are saved
+with the repository review data under `.git/atig/`; pressing `m` again removes
+the bookmark.
+
 Context files are read-only. atig refuses files larger than 2 MiB and files
 that are not UTF-8 text.
 

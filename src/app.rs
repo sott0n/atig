@@ -77,12 +77,40 @@ pub struct AgentReadingPoint {
     pub reason: String,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentIntentSide {
     #[default]
     New,
     Old,
+}
+
+impl From<git::DiffSide> for AgentIntentSide {
+    fn from(side: git::DiffSide) -> Self {
+        match side {
+            git::DiffSide::Old => Self::Old,
+            git::DiffSide::New => Self::New,
+        }
+    }
+}
+
+impl From<AgentIntentSide> for git::DiffSide {
+    fn from(side: AgentIntentSide) -> Self {
+        match side {
+            AgentIntentSide::Old => Self::Old,
+            AgentIntentSide::New => Self::New,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextBookmark {
+    pub source: String,
+    pub version: String,
+    pub file: String,
+    pub line: usize,
+    #[serde(default)]
+    pub side: AgentIntentSide,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -222,6 +250,7 @@ pub struct App {
     pub show_context_reading_trail: bool,
     pub context_jump_direction: Option<isize>,
     pub understanding_threads: Vec<UnderstandingThread>,
+    pub context_bookmarks: Vec<ContextBookmark>,
     pub question_buffer: String,
     pub comments: Vec<ReviewComment>,
     pub comment_buffer: String,
@@ -303,6 +332,7 @@ impl App {
             show_context_reading_trail: false,
             context_jump_direction: None,
             understanding_threads: Vec::new(),
+            context_bookmarks: Vec::new(),
             question_buffer: String::new(),
             comments: Vec::new(),
             comment_buffer: String::new(),
@@ -352,6 +382,7 @@ impl App {
                 Ok(data) => {
                     self.comments = data.comments;
                     self.understanding_threads = data.understanding_threads;
+                    self.context_bookmarks = data.context_bookmarks;
                     self.review_store = Some(store);
                 }
                 Err(error) => self.message = error,
@@ -362,7 +393,11 @@ impl App {
 
     fn persist_reviews(&mut self) {
         if let Some(store) = &self.review_store
-            && let Err(error) = store.save(&self.comments, &self.understanding_threads)
+            && let Err(error) = store.save(
+                &self.comments,
+                &self.understanding_threads,
+                &self.context_bookmarks,
+            )
         {
             self.message = error;
         }
@@ -1523,6 +1558,120 @@ impl App {
             .binary_search(&line)
             .is_ok()
             .then_some(self.context_side)
+    }
+
+    pub fn context_line_is_bookmarked(&self, line: usize) -> bool {
+        let source = self.diff_source.as_ref().map(git::DiffSource::id);
+        self.context_bookmarks.iter().any(|bookmark| {
+            Some(bookmark.source.as_str()) == source.as_deref()
+                && bookmark.version == self.context_version
+                && bookmark.file == self.context_path
+                && bookmark.line == line
+                && bookmark.side == self.context_side.into()
+        })
+    }
+
+    pub fn context_bookmark_count(&self) -> usize {
+        let source = self.diff_source.as_ref().map(git::DiffSource::id);
+        self.context_bookmarks
+            .iter()
+            .filter(|bookmark| Some(bookmark.source.as_str()) == source.as_deref())
+            .count()
+    }
+
+    pub fn toggle_context_bookmark(&mut self) {
+        let Some(source) = self.diff_source.as_ref().map(git::DiffSource::id) else {
+            self.message = "No source available for this bookmark".into();
+            return;
+        };
+        let bookmark = ContextBookmark {
+            source,
+            version: self.context_version.clone(),
+            file: self.context_path.clone(),
+            line: self.context_cursor + 1,
+            side: self.context_side.into(),
+        };
+        if let Some(index) = self
+            .context_bookmarks
+            .iter()
+            .position(|existing| existing == &bookmark)
+        {
+            self.context_bookmarks.remove(index);
+            self.message = format!("Bookmark removed from {}:{}", bookmark.file, bookmark.line);
+        } else {
+            self.context_bookmarks.push(bookmark.clone());
+            self.message = format!("Bookmarked {}:{}", bookmark.file, bookmark.line);
+        }
+        self.persist_reviews();
+    }
+
+    pub fn complete_context_bookmark_jump(&mut self) {
+        let Some(direction) = self.context_jump_direction.take() else {
+            return;
+        };
+        let Some(source) = self.diff_source.as_ref().map(git::DiffSource::id) else {
+            self.message = "No source available for bookmarks".into();
+            return;
+        };
+        let mut bookmarks = self
+            .context_bookmarks
+            .iter()
+            .filter(|bookmark| bookmark.source == source)
+            .cloned()
+            .collect::<Vec<_>>();
+        bookmarks.sort_by(|left, right| {
+            (&left.file, left.line, left.side == AgentIntentSide::Old).cmp(&(
+                &right.file,
+                right.line,
+                right.side == AgentIntentSide::Old,
+            ))
+        });
+        if bookmarks.is_empty() {
+            self.message = "No bookmarks for this review".into();
+            return;
+        }
+        let current = bookmarks.iter().position(|bookmark| {
+            bookmark.version == self.context_version
+                && bookmark.file == self.context_path
+                && bookmark.line == self.context_cursor + 1
+                && bookmark.side == self.context_side.into()
+        });
+        let destination = match (current, direction > 0) {
+            (Some(index), true) => (index + 1) % bookmarks.len(),
+            (Some(0), false) => bookmarks.len() - 1,
+            (Some(index), false) => index - 1,
+            (None, true) => bookmarks
+                .iter()
+                .position(|bookmark| {
+                    bookmark.file.as_str() > self.context_path.as_str()
+                        || (bookmark.file == self.context_path
+                            && bookmark.line > self.context_cursor + 1)
+                })
+                .unwrap_or(0),
+            (None, false) => bookmarks
+                .iter()
+                .rposition(|bookmark| {
+                    bookmark.file.as_str() < self.context_path.as_str()
+                        || (bookmark.file == self.context_path
+                            && bookmark.line < self.context_cursor + 1)
+                })
+                .unwrap_or(bookmarks.len() - 1),
+        };
+        let bookmark = bookmarks[destination].clone();
+        let origin = self.current_context_location();
+        if self.load_context_file(&bookmark.file, bookmark.line, bookmark.side.into()) {
+            if let Some(origin) = origin {
+                self.context_back_stack.push(origin);
+            }
+            self.context_forward_stack.clear();
+            self.message = format!(
+                "Bookmark {}/{} · {}:{}",
+                destination + 1,
+                bookmarks.len(),
+                bookmark.file,
+                bookmark.line
+            );
+        }
     }
 
     fn current_context_location(&self) -> Option<ContextLocation> {
@@ -2934,6 +3083,28 @@ mod tests {
         app.begin_context_jump(-1);
         app.complete_context_change_jump();
         assert_eq!(app.context_cursor, 2);
+    }
+
+    #[test]
+    fn context_bookmarks_toggle_for_the_current_source_line() {
+        let mut app = App::new();
+        app.diff_source = Some(git::DiffSource::Worktree);
+        app.context_path = "src/main.rs".into();
+        app.context_version = "WORKTREE".into();
+        app.context_lines = vec!["one".into(), "two".into()];
+        app.context_cursor = 1;
+
+        app.toggle_context_bookmark();
+
+        assert!(app.context_line_is_bookmarked(2));
+        assert_eq!(app.context_bookmark_count(), 1);
+        assert_eq!(app.context_bookmarks[0].file, "src/main.rs");
+        assert_eq!(app.context_bookmarks[0].line, 2);
+
+        app.toggle_context_bookmark();
+
+        assert!(!app.context_line_is_bookmarked(2));
+        assert_eq!(app.context_bookmark_count(), 0);
     }
 
     #[test]

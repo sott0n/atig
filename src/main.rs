@@ -244,6 +244,12 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 {
                     app.complete_context_change_jump()
                 }
+                (KeyCode::Char('m'), KeyModifiers::NONE)
+                    if app.context_jump_direction.is_some() =>
+                {
+                    app.complete_context_bookmark_jump()
+                }
+                (KeyCode::Char('m'), KeyModifiers::NONE) => app.toggle_context_bookmark(),
                 (KeyCode::Char('Q'), KeyModifiers::SHIFT) => app.start_understanding_question(),
                 (KeyCode::Char('R'), KeyModifiers::SHIFT) => app.request_guided_reading(),
                 (KeyCode::Char('T'), KeyModifiers::SHIFT) => app.toggle_context_reading_trail(),

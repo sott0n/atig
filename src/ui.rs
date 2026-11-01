@@ -146,6 +146,7 @@ fn draw_help(frame: &mut Frame, areas: &[ratatui::layout::Rect]) {
         "[i / ]i            previous / next Agent Intent",
         "[r / ]r            previous / next reading point",
         "[c / ]c            previous / next changed line",
+        "m, [m / ]m        toggle / visit code bookmarks",
         "Ctrl-o / Ctrl-i    older / newer context location",
         "Q                 ask Agent about context line",
         "V, move, Q        ask Agent about a code range",
@@ -265,7 +266,10 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
             text,
             number_width,
             selection,
-            app.context_change_side(index + 1),
+            SourceGutter {
+                changed_side: app.context_change_side(index + 1),
+                bookmarked: app.context_line_is_bookmarked(index + 1),
+            },
             app.context_horizontal_scroll,
             areas[0].width as usize,
         ));
@@ -323,11 +327,12 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
             format!("VISUAL LINES {start}-{end} · Q ask range · V/Esc cancel")
         } else {
             format!(
-                "{} · {} · line {position}/{} · col {} · h/l horizontal · / file · * repo · Q ask · R guide · T trail · [c/]c changes · [r/]r trail · ^o/^i history · b diff",
+                "{} · {} · line {position}/{} · col {} · ◆{} · m mark · [m/]m marks · / file · * repo · Q ask · R guide · T trail · b diff",
                 app.context_path,
                 app.context_version,
                 app.context_lines.len(),
-                app.context_horizontal_scroll + 1
+                app.context_horizontal_scroll + 1,
+                app.context_bookmark_count()
             )
         }
     });
@@ -469,21 +474,28 @@ enum SourceSelection {
     Range,
 }
 
+#[derive(Clone, Copy)]
+struct SourceGutter {
+    changed_side: Option<crate::git::DiffSide>,
+    bookmarked: bool,
+}
+
 fn source_line(
     number: usize,
     text: &str,
     number_width: usize,
     selection: SourceSelection,
-    changed_side: Option<crate::git::DiffSide>,
+    gutter: SourceGutter,
     horizontal_scroll: usize,
     viewport_width: usize,
 ) -> Line<'static> {
-    let marker = match changed_side {
+    let marker = match gutter.changed_side {
         Some(crate::git::DiffSide::New) => '+',
         Some(crate::git::DiffSide::Old) => '-',
         None => ' ',
     };
-    let prefix = format!("{marker}{number:>number_width$} │ ");
+    let bookmark_marker = if gutter.bookmarked { '◆' } else { ' ' };
+    let prefix = format!("{marker}{bookmark_marker}{number:>number_width$} │ ");
     let visible_text = visible_source_text(
         text,
         horizontal_scroll,
@@ -528,13 +540,25 @@ fn source_line(
         ));
         line
     } else {
-        let marker_color = match changed_side {
+        let marker_color = match gutter.changed_side {
             Some(crate::git::DiffSide::New) => Color::Green,
             Some(crate::git::DiffSide::Old) => Color::Red,
             None => Color::DarkGray,
         };
         Line::from(vec![
-            Span::styled(prefix, Style::default().fg(marker_color)),
+            Span::styled(marker.to_string(), Style::default().fg(marker_color)),
+            Span::styled(
+                bookmark_marker.to_string(),
+                Style::default().fg(if gutter.bookmarked {
+                    Color::Cyan
+                } else {
+                    Color::DarkGray
+                }),
+            ),
+            Span::styled(
+                format!("{number:>number_width$} │ "),
+                Style::default().fg(Color::DarkGray),
+            ),
             Span::raw(visible_text),
         ])
     }
@@ -1520,7 +1544,10 @@ mod tests {
             "let answer = 42;",
             3,
             SourceSelection::Cursor,
-            None,
+            SourceGutter {
+                changed_side: None,
+                bookmarked: false,
+            },
             0,
             40,
         );
@@ -1536,13 +1563,35 @@ mod tests {
             "let answer = 42;",
             3,
             SourceSelection::None,
-            Some(crate::git::DiffSide::New),
+            SourceGutter {
+                changed_side: Some(crate::git::DiffSide::New),
+                bookmarked: false,
+            },
             0,
             40,
         );
 
-        assert!(rendered.to_string().starts_with("+ 12 │"));
+        assert!(rendered.to_string().starts_with("+  12 │"));
         assert_eq!(rendered.spans[0].style.fg, Some(Color::Green));
+    }
+
+    #[test]
+    fn bookmarked_source_line_has_a_cyan_gutter_marker() {
+        let rendered = source_line(
+            12,
+            "let answer = 42;",
+            3,
+            SourceSelection::None,
+            SourceGutter {
+                changed_side: None,
+                bookmarked: true,
+            },
+            0,
+            40,
+        );
+
+        assert!(rendered.to_string().starts_with(" ◆ 12 │"));
+        assert_eq!(rendered.spans[1].style.fg, Some(Color::Cyan));
     }
 
     #[test]
@@ -1552,7 +1601,10 @@ mod tests {
             "let answer = 42;",
             3,
             SourceSelection::Range,
-            None,
+            SourceGutter {
+                changed_side: None,
+                bookmarked: false,
+            },
             0,
             40,
         );
