@@ -139,6 +139,13 @@ forward and backward. atig opens only safe repository-relative text files;
 Reading Trail paths cannot escape the repository through `..`, absolute paths,
 or symbolic links.
 
+Press `Q` on any Context View line to ask the selected Agent about that code.
+The request includes a bounded source excerpt and explicitly permits read-only
+inspection only—no file edits, formatting, commits, or pushes. The answer is
+shown below that source line and persisted with the review data. Press `s` to
+select a different Agent session. If the working tree changes during an
+understanding request, atig adds a visible safety warning to the answer.
+
 Context files are read-only. atig refuses files larger than 2 MiB and files
 that are not UTF-8 text.
 

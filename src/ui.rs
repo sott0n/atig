@@ -114,6 +114,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
             frame.set_cursor_position((cursor_x, areas[1].y));
         }
         InputMode::Comment => unreachable!("comments are drawn in the diff view"),
+        InputMode::Question => unreachable!("questions are drawn in the context view"),
         InputMode::ConfirmSend => unreachable!("send confirmation is drawn in the review view"),
         InputMode::Search => draw_search_prompt(frame, app, areas[1]),
     }
@@ -135,6 +136,7 @@ fn draw_help(frame: &mut Frame, areas: &[ratatui::layout::Rect]) {
         "[c / ]c, { / }     previous / next change",
         "[i / ]i            previous / next Agent Intent",
         "[r / ]r            previous / next reading point",
+        "Q                 ask Agent about context line",
         ":goto <line>       jump to a diff line",
         "/, n, N           search / next / previous",
         "r                 reload",
@@ -200,41 +202,76 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
         None
     };
     let source_height = height.saturating_sub(usize::from(trail_header.is_some()));
-    let start = app
+    let mut start = app
         .context_cursor
         .saturating_sub((source_height / 4).max(1))
         .min(app.context_lines.len().saturating_sub(source_height));
+    let rows_before_selection = usize::from(trail_header.is_some())
+        + (start..app.context_cursor)
+            .map(|index| {
+                1 + app
+                    .understanding_threads_at_context(index + 1)
+                    .iter()
+                    .map(|thread| understanding_thread_box(thread, areas[0].width as usize).len())
+                    .sum::<usize>()
+            })
+            .sum::<usize>();
+    if rows_before_selection >= height {
+        start = app.context_cursor;
+    }
     let number_width = app.context_lines.len().max(1).to_string().len();
     let mut lines = trail_header.into_iter().collect::<Vec<_>>();
-    lines.extend(
-        app.context_lines
-            .iter()
-            .enumerate()
-            .skip(start)
-            .take(source_height)
-            .map(|(index, text)| {
-                source_line(
-                    index + 1,
-                    text,
-                    number_width,
-                    index == app.context_cursor,
-                    areas[0].width as usize,
-                )
-            }),
-    );
+    for (index, text) in app.context_lines.iter().enumerate().skip(start) {
+        if lines.len() >= height {
+            break;
+        }
+        lines.push(source_line(
+            index + 1,
+            text,
+            number_width,
+            index == app.context_cursor,
+            areas[0].width as usize,
+        ));
+        for thread in app.understanding_threads_at_context(index + 1) {
+            lines.extend(understanding_thread_box(thread, areas[0].width as usize));
+        }
+    }
+    lines.truncate(height);
     frame.render_widget(Paragraph::new(Text::from(lines)), areas[0]);
+
+    if app.input_mode == InputMode::Question {
+        let prompt = format!("Ask Agent: {}", app.question_buffer);
+        frame.render_widget(
+            Paragraph::new(prompt).style(
+                Style::default()
+                    .fg(Color::White)
+                    .bg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            areas[1],
+        );
+        let cursor_x = areas[1]
+            .x
+            .saturating_add("Ask Agent: ".len() as u16)
+            .saturating_add(app.question_buffer.chars().count() as u16)
+            .min(areas[1].right().saturating_sub(1));
+        frame.set_cursor_position((cursor_x, areas[1].y));
+        return;
+    }
 
     let position = if app.context_lines.is_empty() {
         0
     } else {
         app.context_cursor + 1
     };
-    let left = format!(
-        "{} · {} · line {position}/{} · [r/]r trail · b back",
-        app.context_path,
-        app.context_version,
-        app.context_lines.len()
-    );
+    let left = app.delivery_message.clone().unwrap_or_else(|| {
+        format!(
+            "{} · {} · line {position}/{} · Q ask · [r/]r trail · b back",
+            app.context_path,
+            app.context_version,
+            app.context_lines.len()
+        )
+    });
     let right = if app.context_lines.is_empty() {
         "0%".to_string()
     } else {
@@ -250,6 +287,45 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
         ),
         areas[1],
     );
+}
+
+fn understanding_thread_box(
+    thread: &crate::app::UnderstandingThread,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let content_width = width.saturating_sub(4).max(1);
+    let mut lines = vec![Line::from(vec![
+        Span::styled("  ? ", Style::default().fg(Color::Cyan)),
+        Span::styled(
+            "YOU ASKED",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])];
+    for chunk in wrap_comment_body(&thread.question, content_width) {
+        lines.push(Line::from(vec![
+            Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
+            Span::styled(chunk, Style::default().fg(Color::White)),
+        ]));
+    }
+    lines.push(Line::from(vec![
+        Span::styled("  ◆ ", Style::default().fg(Color::Magenta)),
+        Span::styled(
+            format!("AGENT · {}", thread.agent),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    let answer = thread.answer.as_deref().unwrap_or("Thinking...");
+    for chunk in wrap_comment_body(answer, content_width) {
+        lines.push(Line::from(vec![
+            Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
+            Span::styled(chunk, Style::default().fg(Color::White)),
+        ]));
+    }
+    lines
 }
 
 fn reading_point_location(point: &crate::app::AgentReadingPoint) -> String {
@@ -1177,6 +1253,29 @@ mod tests {
 
         assert!(rendered.to_string().contains("  12 │ let answer = 42;"));
         assert_eq!(rendered.width(), 40);
+    }
+
+    #[test]
+    fn understanding_thread_shows_the_question_and_agent_answer() {
+        let thread = crate::app::UnderstandingThread {
+            source: "WORKTREE".into(),
+            version: "WORKTREE".into(),
+            file: "src/main.rs".into(),
+            line: 12,
+            question: "Why retry here?".into(),
+            agent: "codex:session-1".into(),
+            answer: Some("This is the shared request boundary.".into()),
+        };
+        let text = understanding_thread_box(&thread, 60)
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("YOU ASKED"));
+        assert!(text.contains("Why retry here?"));
+        assert!(text.contains("AGENT · codex:session-1"));
+        assert!(text.contains("shared request boundary"));
     }
 
     #[test]

@@ -148,10 +148,21 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
         }
 
         if app.view == View::Context {
+            if app.input_mode == InputMode::Question {
+                match key.code {
+                    KeyCode::Esc => app.cancel_understanding_question(),
+                    KeyCode::Enter => app.submit_understanding_question(),
+                    KeyCode::Backspace => app.question_backspace(),
+                    KeyCode::Char(character) => app.question_push(character),
+                    _ => {}
+                }
+                continue;
+            }
             let (_, terminal_height) = crossterm::terminal::size()?;
             let page = terminal_height.saturating_sub(1).max(1) as isize;
             let half_page = (page / 2).max(1);
             match (key.code, key.modifiers) {
+                (KeyCode::Esc, KeyModifiers::NONE) if app.cancel_agent_dispatch() => {}
                 (KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('b'), KeyModifiers::NONE) => {
                     app.close_context()
                 }
@@ -183,6 +194,8 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 {
                     app.complete_context_reading_jump()
                 }
+                (KeyCode::Char('Q'), KeyModifiers::SHIFT) => app.start_understanding_question(),
+                (KeyCode::Char('s'), KeyModifiers::NONE) => app.open_sessions(),
                 (KeyCode::Char('?'), _) => app.open_help(),
                 _ => {
                     app.pending_g = false;
@@ -320,6 +333,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 _ => {}
             },
             InputMode::Comment => unreachable!("comments are only entered in the diff view"),
+            InputMode::Question => unreachable!("questions are only entered in the context view"),
             InputMode::ConfirmSend => unreachable!("send confirmation is handled first"),
             InputMode::Search => unreachable!("search input is handled first"),
         }

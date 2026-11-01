@@ -16,6 +16,7 @@ pub enum InputMode {
     Normal,
     Command,
     Comment,
+    Question,
     ConfirmSend,
     Search,
 }
@@ -130,6 +131,24 @@ pub struct ReviewComment {
     pub thread: Vec<ReviewThreadMessage>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnderstandingThread {
+    pub source: String,
+    #[serde(default)]
+    pub version: String,
+    pub file: String,
+    pub line: usize,
+    pub question: String,
+    pub agent: String,
+    pub answer: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DispatchPurpose {
+    Review,
+    Understanding(usize),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffFileSummary {
     pub path: String,
@@ -175,6 +194,8 @@ pub struct App {
     pub context_reading_path: Vec<AgentReadingPoint>,
     pub context_reading_index: Option<usize>,
     pub context_jump_direction: Option<isize>,
+    pub understanding_threads: Vec<UnderstandingThread>,
+    pub question_buffer: String,
     pub comments: Vec<ReviewComment>,
     pub comment_buffer: String,
     pub comment_selected: usize,
@@ -196,6 +217,7 @@ pub struct App {
     dispatch_rx: Option<Receiver<DispatchEvent>>,
     dispatch_cancel: Option<agent::DispatchCancellation>,
     dispatch_snapshot: Option<git::ChangeSnapshot>,
+    dispatch_purpose: Option<DispatchPurpose>,
     pub last_agent_changes: Vec<String>,
     session_rx: Option<Receiver<SessionListEvent>>,
     help_return: View,
@@ -238,6 +260,8 @@ impl App {
             context_reading_path: Vec::new(),
             context_reading_index: None,
             context_jump_direction: None,
+            understanding_threads: Vec::new(),
+            question_buffer: String::new(),
             comments: Vec::new(),
             comment_buffer: String::new(),
             comment_selected: 0,
@@ -259,6 +283,7 @@ impl App {
             dispatch_rx: None,
             dispatch_cancel: None,
             dispatch_snapshot: None,
+            dispatch_purpose: None,
             last_agent_changes: Vec::new(),
             session_rx: None,
             help_return: View::History,
@@ -275,8 +300,9 @@ impl App {
     pub fn enable_review_store(&mut self) {
         match ReviewStore::discover() {
             Ok(store) => match store.load() {
-                Ok(comments) => {
-                    self.comments = comments;
+                Ok(data) => {
+                    self.comments = data.comments;
+                    self.understanding_threads = data.understanding_threads;
                     self.review_store = Some(store);
                 }
                 Err(error) => self.message = error,
@@ -287,7 +313,7 @@ impl App {
 
     fn persist_reviews(&mut self) {
         if let Some(store) = &self.review_store
-            && let Err(error) = store.save(&self.comments)
+            && let Err(error) = store.save(&self.comments, &self.understanding_threads)
         {
             self.message = error;
         }
@@ -1172,6 +1198,85 @@ impl App {
             .and_then(|index| self.context_reading_path.get(index))
     }
 
+    pub fn start_understanding_question(&mut self) {
+        if self.dispatching {
+            self.message = "An Agent request is already running".into();
+        } else if self.agent_target.is_none() {
+            self.message = "Select an agent session with s before asking".into();
+            self.delivery_message = Some(self.message.clone());
+        } else {
+            self.question_buffer.clear();
+            self.input_mode = InputMode::Question;
+        }
+    }
+
+    pub fn question_push(&mut self, character: char) {
+        self.question_buffer.push(character);
+    }
+
+    pub fn question_backspace(&mut self) {
+        self.question_buffer.pop();
+    }
+
+    pub fn cancel_understanding_question(&mut self) {
+        self.question_buffer.clear();
+        self.input_mode = InputMode::Normal;
+    }
+
+    pub fn submit_understanding_question(&mut self) {
+        let question = self.question_buffer.trim().to_string();
+        if question.is_empty() {
+            self.cancel_understanding_question();
+            return;
+        }
+        let Some(target) = self.agent_target.clone() else {
+            self.cancel_understanding_question();
+            return;
+        };
+        let Some(source) = self.diff_source.as_ref().map(git::DiffSource::id) else {
+            self.message = "No source available for this question".into();
+            self.cancel_understanding_question();
+            return;
+        };
+        let line = self.context_cursor + 1;
+        let prompt =
+            format_understanding_request(&self.context_path, line, &question, &self.context_lines);
+        let thread_index = self.understanding_threads.len();
+        self.understanding_threads.push(UnderstandingThread {
+            source,
+            version: self.context_version.clone(),
+            file: self.context_path.clone(),
+            line,
+            question,
+            agent: target.response_label(),
+            answer: None,
+        });
+        self.persist_reviews();
+        let (tx, rx) = mpsc::channel();
+        self.dispatch_snapshot = git::change_snapshot().ok();
+        self.dispatch_purpose = Some(DispatchPurpose::Understanding(thread_index));
+        self.dispatched_agent = Some(target.response_label());
+        self.delivery_message = Some(format!("Asking {}...", target.short_label()));
+        self.dispatch_cancel = Some(agent::dispatch(target, prompt, tx));
+        self.dispatch_rx = Some(rx);
+        self.dispatching = true;
+        self.question_buffer.clear();
+        self.input_mode = InputMode::Normal;
+    }
+
+    pub fn understanding_threads_at_context(&self, line: usize) -> Vec<&UnderstandingThread> {
+        let source = self.diff_source.as_ref().map(git::DiffSource::id);
+        self.understanding_threads
+            .iter()
+            .filter(|thread| {
+                Some(thread.source.as_str()) == source.as_deref()
+                    && thread.version == self.context_version
+                    && thread.file == self.context_path
+                    && thread.line == line
+            })
+            .collect()
+    }
+
     pub fn editing_comment_index(&self) -> Option<usize> {
         self.comment_edit_index
     }
@@ -1266,6 +1371,7 @@ impl App {
             .unwrap_or_else(|| self.comments.clone());
         let prompt = format_review_request(&comments);
         self.dispatch_snapshot = git::change_snapshot().ok();
+        self.dispatch_purpose = Some(DispatchPurpose::Review);
         let (tx, rx) = mpsc::channel();
         self.dispatched_agent = Some(target.response_label());
         self.delivery_message = Some(format!("Sending review to {}...", target.short_label()));
@@ -1295,6 +1401,35 @@ impl App {
                 self.dispatch_rx = None;
                 self.dispatch_cancel = None;
                 self.dispatching = false;
+                let purpose = self
+                    .dispatch_purpose
+                    .take()
+                    .unwrap_or(DispatchPurpose::Review);
+                if let DispatchPurpose::Understanding(index) = purpose {
+                    let changed = self
+                        .dispatch_snapshot
+                        .take()
+                        .and_then(|before| git::change_snapshot().ok().map(|after| (before, after)))
+                        .map(|(before, after)| changed_paths(&before, &after))
+                        .unwrap_or_default();
+                    if !changed.is_empty() {
+                        self.last_agent_changes = changed.clone();
+                        response.push_str(&format!(
+                            "\n\nSafety warning: the read-only question changed {} file(s): {}.",
+                            changed.len(),
+                            changed.join(", ")
+                        ));
+                    }
+                    if let Some(thread) = self.understanding_threads.get_mut(index) {
+                        thread.answer = Some(response);
+                    }
+                    self.dispatched_agent = None;
+                    self.dispatched_comments.clear();
+                    self.message = "Agent explanation received".into();
+                    self.delivery_message = Some(self.message.clone());
+                    self.persist_reviews();
+                    return true;
+                }
                 let delivered = std::mem::take(&mut self.dispatched_comments);
                 if let Some(before) = self.dispatch_snapshot.take()
                     && let Ok(after) = git::change_snapshot()
@@ -1376,6 +1511,12 @@ impl App {
                 self.dispatched_comments.clear();
                 self.dispatched_agent = None;
                 self.dispatch_snapshot = None;
+                if let Some(DispatchPurpose::Understanding(index)) = self.dispatch_purpose.take()
+                    && let Some(thread) = self.understanding_threads.get_mut(index)
+                {
+                    thread.answer = Some(format!("Request failed: {error}"));
+                    self.persist_reviews();
+                }
                 self.message = error.clone();
                 self.delivery_message = Some(format!("Send failed: {error}"));
             }
@@ -1987,6 +2128,24 @@ fn format_review_request(comments: &[ReviewComment]) -> String {
         }
         prompt.push('\n');
     }
+    prompt
+}
+
+fn format_understanding_request(
+    file: &str,
+    line: usize,
+    question: &str,
+    source: &[String],
+) -> String {
+    let start = line.saturating_sub(13);
+    let end = line.saturating_add(12).min(source.len());
+    let mut prompt = format!(
+        "Help a human understand the existing code at {file}:{line}. Answer the question using read-only inspection only. Do not edit, create, delete, or format files; do not commit or push. Explain the behavior and rationale from the code, cite repository-relative file:line locations for important claims, and say when something cannot be determined from the code.\n\nQuestion: {question}\n\nSelected source context:\n```text\n"
+    );
+    for (index, text) in source.iter().enumerate().take(end).skip(start) {
+        prompt.push_str(&format!("{:>6} {}\n", index + 1, text));
+    }
+    prompt.push_str("```\n");
     prompt
 }
 
@@ -2648,6 +2807,48 @@ mod tests {
             app.delivery_message.as_deref(),
             Some("Agent: Running tests...")
         );
+    }
+
+    #[test]
+    fn understanding_response_is_attached_to_its_source_line() {
+        let mut app = App::new();
+        app.understanding_threads.push(UnderstandingThread {
+            source: "WORKTREE".into(),
+            version: "WORKTREE".into(),
+            file: "src/main.rs".into(),
+            line: 12,
+            question: "Why is this branch needed?".into(),
+            agent: "codex:session-1".into(),
+            answer: None,
+        });
+        app.dispatch_purpose = Some(DispatchPurpose::Understanding(0));
+        app.dispatching = true;
+        let (tx, rx) = mpsc::channel();
+        tx.send(DispatchEvent::Done("It handles the fallback path.".into()))
+            .unwrap();
+        app.dispatch_rx = Some(rx);
+
+        assert!(app.drain_dispatch_events());
+        assert_eq!(
+            app.understanding_threads[0].answer.as_deref(),
+            Some("It handles the fallback path.")
+        );
+        assert_eq!(app.message, "Agent explanation received");
+    }
+
+    #[test]
+    fn understanding_prompt_is_bounded_and_forbids_code_changes() {
+        let source = (1..=40)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>();
+        let prompt =
+            format_understanding_request("src/main.rs", 20, "Why is this branch needed?", &source);
+
+        assert!(prompt.contains("Do not edit, create, delete, or format files"));
+        assert!(prompt.contains("src/main.rs:20"));
+        assert!(prompt.contains("Question: Why is this branch needed?"));
+        assert!(!prompt.contains("     1 line 1"));
+        assert!(prompt.contains("    20 line 20"));
     }
 
     #[test]

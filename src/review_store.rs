@@ -4,7 +4,23 @@ use std::{
     process::Command,
 };
 
-use crate::app::ReviewComment;
+use serde::{Deserialize, Serialize};
+
+use crate::app::{ReviewComment, UnderstandingThread};
+
+#[derive(Default, Serialize, Deserialize)]
+pub struct ReviewData {
+    pub comments: Vec<ReviewComment>,
+    #[serde(default)]
+    pub understanding_threads: Vec<UnderstandingThread>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredReviewData {
+    Current(ReviewData),
+    Legacy(Vec<ReviewComment>),
+}
 
 pub struct ReviewStore {
     path: PathBuf,
@@ -28,16 +44,28 @@ impl ReviewStore {
         Ok(Self { path })
     }
 
-    pub fn load(&self) -> Result<Vec<ReviewComment>, String> {
+    pub fn load(&self) -> Result<ReviewData, String> {
         if !self.path.exists() {
-            return Ok(Vec::new());
+            return Ok(ReviewData::default());
         }
         let contents = fs::read_to_string(&self.path)
             .map_err(|error| format!("Cannot read saved reviews: {error}"))?;
-        serde_json::from_str(&contents).map_err(|error| format!("Invalid saved reviews: {error}"))
+        let stored: StoredReviewData = serde_json::from_str(&contents)
+            .map_err(|error| format!("Invalid saved reviews: {error}"))?;
+        Ok(match stored {
+            StoredReviewData::Current(data) => data,
+            StoredReviewData::Legacy(comments) => ReviewData {
+                comments,
+                understanding_threads: Vec::new(),
+            },
+        })
     }
 
-    pub fn save(&self, comments: &[ReviewComment]) -> Result<(), String> {
+    pub fn save(
+        &self,
+        comments: &[ReviewComment],
+        understanding_threads: &[UnderstandingThread],
+    ) -> Result<(), String> {
         let parent = self
             .path
             .parent()
@@ -45,8 +73,11 @@ impl ReviewStore {
         fs::create_dir_all(parent)
             .map_err(|error| format!("Cannot create review store: {error}"))?;
         let temporary = temporary_path(&self.path);
-        let contents = serde_json::to_vec_pretty(comments)
-            .map_err(|error| format!("Cannot encode reviews: {error}"))?;
+        let contents = serde_json::to_vec_pretty(&ReviewData {
+            comments: comments.to_vec(),
+            understanding_threads: understanding_threads.to_vec(),
+        })
+        .map_err(|error| format!("Cannot encode reviews: {error}"))?;
         fs::write(&temporary, contents)
             .map_err(|error| format!("Cannot write saved reviews: {error}"))?;
         fs::rename(&temporary, &self.path)
@@ -61,7 +92,7 @@ fn temporary_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{ReviewScope, ReviewThreadMessage, ReviewThreadRole};
+    use crate::app::{ReviewScope, ReviewThreadMessage, ReviewThreadRole, UnderstandingThread};
 
     #[test]
     fn round_trips_review_threads() {
@@ -81,8 +112,25 @@ mod tests {
             }],
         }];
 
-        store.save(&comments).unwrap();
-        assert_eq!(store.load().unwrap(), comments);
+        let understanding_threads = vec![UnderstandingThread {
+            source: "WORKTREE".into(),
+            version: "WORKTREE".into(),
+            file: "src/main.rs".into(),
+            line: 8,
+            question: "Why?".into(),
+            agent: "codex:session".into(),
+            answer: Some("Because.".into()),
+        }];
+
+        store.save(&comments, &understanding_threads).unwrap();
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.comments, comments);
+        assert_eq!(loaded.understanding_threads, understanding_threads);
+
+        fs::write(&store.path, serde_json::to_vec(&comments).unwrap()).unwrap();
+        let legacy = store.load().unwrap();
+        assert_eq!(legacy.comments, comments);
+        assert!(legacy.understanding_threads.is_empty());
 
         fs::remove_dir_all(root).unwrap();
     }
