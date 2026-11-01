@@ -153,6 +153,12 @@ Agent answers can include up to five explicit code references. They appear as
 source line to move through the referenced code. atig hides the transport
 manifest and rejects unsafe or invalid reference paths.
 
+Context navigation keeps a Vim-style location history. After following a
+Reading Trail or answer reference, press `Ctrl-o` to return to the previous
+code location and `Ctrl-i` to move forward again. Because many terminals send
+`Ctrl-i` as `Tab`, `Tab` is accepted as the forward action. This history is
+separate from `b`, which returns directly to the original diff.
+
 Context files are read-only. atig refuses files larger than 2 MiB and files
 that are not UTF-8 text.
 

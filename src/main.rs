@@ -178,6 +178,10 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 (KeyCode::Char('b'), KeyModifiers::CONTROL) | (KeyCode::PageUp, _) => {
                     app.move_context(-page)
                 }
+                (KeyCode::Char('o'), KeyModifiers::CONTROL) => app.context_history_back(),
+                (KeyCode::Char('i'), KeyModifiers::CONTROL) | (KeyCode::Tab, _) => {
+                    app.context_history_forward()
+                }
                 (KeyCode::Char('g'), KeyModifiers::NONE) => app.handle_context_g(),
                 (KeyCode::Char('G'), KeyModifiers::SHIFT) | (KeyCode::End, _) => {
                     app.select_context_end()

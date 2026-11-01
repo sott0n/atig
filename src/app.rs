@@ -170,6 +170,14 @@ struct CommentAnchor {
     context: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContextLocation {
+    path: String,
+    line: usize,
+    side: git::DiffSide,
+    reading_index: Option<usize>,
+}
+
 pub struct App {
     pub history: Vec<HistoryLine>,
     pub selected: Option<usize>,
@@ -195,6 +203,9 @@ pub struct App {
     pub context_lines: Vec<String>,
     pub context_cursor: usize,
     pub context_version: String,
+    context_side: git::DiffSide,
+    context_back_stack: Vec<ContextLocation>,
+    context_forward_stack: Vec<ContextLocation>,
     pub context_reading_path: Vec<AgentReadingPoint>,
     pub context_reading_index: Option<usize>,
     pub context_jump_direction: Option<isize>,
@@ -261,6 +272,9 @@ impl App {
             context_lines: Vec::new(),
             context_cursor: 0,
             context_version: String::new(),
+            context_side: git::DiffSide::New,
+            context_back_stack: Vec::new(),
+            context_forward_stack: Vec::new(),
             context_reading_path: Vec::new(),
             context_reading_index: None,
             context_jump_direction: None,
@@ -1099,6 +1113,8 @@ impl App {
             self.context_reading_path = reading_path;
             self.context_reading_index = None;
             self.context_jump_direction = None;
+            self.context_back_stack.clear();
+            self.context_forward_stack.clear();
             self.view = View::Context;
             self.pending_g = false;
         }
@@ -1117,6 +1133,7 @@ impl App {
                     .min(file.lines.len().saturating_sub(1));
                 self.context_lines = file.lines;
                 self.context_version = file.version;
+                self.context_side = side;
                 true
             }
             Err(error) => {
@@ -1202,9 +1219,57 @@ impl App {
             return;
         };
         let point = self.context_reading_path[destination].clone();
+        let origin = self.current_context_location();
         if self.load_context_file(&point.file, point.line, git::DiffSide::New) {
             self.context_reading_index = Some(destination);
+            if let Some(origin) = origin {
+                self.context_back_stack.push(origin);
+            }
+            self.context_forward_stack.clear();
             self.message = format!("Read: {}", point.reason);
+        }
+    }
+
+    fn current_context_location(&self) -> Option<ContextLocation> {
+        (!self.context_path.is_empty()).then(|| ContextLocation {
+            path: self.context_path.clone(),
+            line: self.context_cursor + 1,
+            side: self.context_side,
+            reading_index: self.context_reading_index,
+        })
+    }
+
+    pub fn context_history_back(&mut self) {
+        let Some(target) = self.context_back_stack.pop() else {
+            self.message = "No older context location".into();
+            return;
+        };
+        let current = self.current_context_location();
+        if self.load_context_file(&target.path, target.line, target.side) {
+            self.context_reading_index = target.reading_index;
+            if let Some(current) = current {
+                self.context_forward_stack.push(current);
+            }
+            self.message = format!("Back to {}:{}", target.path, target.line);
+        } else {
+            self.context_back_stack.push(target);
+        }
+    }
+
+    pub fn context_history_forward(&mut self) {
+        let Some(target) = self.context_forward_stack.pop() else {
+            self.message = "No newer context location".into();
+            return;
+        };
+        let current = self.current_context_location();
+        if self.load_context_file(&target.path, target.line, target.side) {
+            self.context_reading_index = target.reading_index;
+            if let Some(current) = current {
+                self.context_back_stack.push(current);
+            }
+            self.message = format!("Forward to {}:{}", target.path, target.line);
+        } else {
+            self.context_forward_stack.push(target);
         }
     }
 
@@ -2836,6 +2901,12 @@ mod tests {
         assert_eq!(app.context_path, "Cargo.toml");
         assert_eq!(app.context_reading_index, Some(0));
         assert_eq!(app.message, "Read: Understand the crate context");
+        app.context_history_back();
+        assert_eq!(app.context_path, "src/main.rs");
+        assert_eq!(app.context_cursor, 0);
+        app.context_history_forward();
+        assert_eq!(app.context_path, "Cargo.toml");
+        assert_eq!(app.context_reading_index, Some(0));
 
         app.toggle_agent_intents();
         assert!(!app.show_agent_intents);
