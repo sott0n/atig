@@ -195,6 +195,10 @@ Use `j`/`k` to select the Agent response, press `Enter` to write a follow-up,
 then press `S` on that thread to send the complete conversation context back
 to the selected Agent session.
 
+Review threads are restored across `atig` runs from
+`.git/atig/reviews.json`. Saved line and range reviews are re-anchored from
+their file and line scope when the diff is loaded again.
+
 Delivery is deliberately conservative:
 
 - A destination must be configured explicitly.
@@ -223,7 +227,6 @@ still streamed; there is no artificial commit limit.
 
 - Only committed changes can be reviewed; working-tree and staged diffs do not
   yet have dedicated views.
-- Review comments are not persisted between `atig` processes.
 - Agent responses appear after the CLI command finishes; token-by-token
   streaming is not implemented.
 - The generic `other` agent adapter is not implemented.

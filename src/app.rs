@@ -1,7 +1,10 @@
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
+use serde::{Deserialize, Serialize};
+
 use crate::agent::{self, AgentSession, AgentTarget, DispatchEvent, SessionListEvent};
 use crate::git::{self, DiffEvent, HistoryEvent, HistoryLine};
+use crate::review_store::ReviewStore;
 
 const MAX_EVENTS_PER_TICK: usize = 256;
 
@@ -29,19 +32,19 @@ pub enum DiffTarget {
     Change,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReviewThreadRole {
     Human,
     Agent(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewThreadMessage {
     pub role: ReviewThreadRole,
     pub body: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReviewScope {
     Commit,
     File(String),
@@ -76,7 +79,7 @@ impl ReviewScope {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewComment {
     pub commit: String,
     pub scope: ReviewScope,
@@ -140,6 +143,7 @@ pub struct App {
     diff_rx: Option<Receiver<DiffEvent>>,
     diff_cancel: Option<git::Cancellation>,
     pending_graph: Option<String>,
+    review_store: Option<ReviewStore>,
 }
 
 impl App {
@@ -190,6 +194,28 @@ impl App {
             diff_rx: None,
             diff_cancel: None,
             pending_graph: None,
+            review_store: None,
+        }
+    }
+
+    pub fn enable_review_store(&mut self) {
+        match ReviewStore::discover() {
+            Ok(store) => match store.load() {
+                Ok(comments) => {
+                    self.comments = comments;
+                    self.review_store = Some(store);
+                }
+                Err(error) => self.message = error,
+            },
+            Err(error) => self.message = error,
+        }
+    }
+
+    fn persist_reviews(&mut self) {
+        if let Some(store) = &self.review_store
+            && let Err(error) = store.save(&self.comments)
+        {
+            self.message = error;
         }
     }
 
@@ -751,6 +777,7 @@ impl App {
             self.comment_buffer.clear();
             self.input_mode = InputMode::Normal;
             self.message = "Comment updated".into();
+            self.persist_reviews();
             return;
         }
         if let Some(index) = self.comment_followup_index.take() {
@@ -765,6 +792,7 @@ impl App {
             self.comment_buffer.clear();
             self.input_mode = InputMode::Normal;
             self.message = "Follow-up added".into();
+            self.persist_reviews();
             return;
         }
         let Some(anchor) = self.comment_anchor.take() else {
@@ -785,6 +813,7 @@ impl App {
         self.comment_buffer.clear();
         self.input_mode = InputMode::Normal;
         self.message = format!("{} review comments", self.comments.len());
+        self.persist_reviews();
     }
 
     pub fn open_comments(&mut self) {
@@ -864,6 +893,7 @@ impl App {
         }
         self.remove_comment_at(self.comment_selected);
         self.message = format!("{} review comments", self.comments.len());
+        self.persist_reviews();
     }
 
     fn remove_comment_at(&mut self, removed: usize) {
@@ -985,6 +1015,7 @@ impl App {
                     format!("Agent response attached to {attached} comments")
                 };
                 self.delivery_message = Some(self.message.clone());
+                self.persist_reviews();
             }
             DispatchEvent::Error(error) => {
                 self.dispatched_comments.clear();
@@ -1016,6 +1047,7 @@ impl App {
                     self.diff_loading = false;
                     self.diff_rx = None;
                     self.diff_cancel = None;
+                    self.reanchor_reviews();
                     self.message = format!("{} lines", self.diff.len());
                 }
                 DiffEvent::Error(error) => {
@@ -1027,6 +1059,22 @@ impl App {
             }
         }
         changed
+    }
+
+    fn reanchor_reviews(&mut self) {
+        let Some(id) = self.diff_oid.as_deref() else {
+            return;
+        };
+        for comment in self
+            .comments
+            .iter_mut()
+            .filter(|comment| comment.commit == id)
+        {
+            if let Some(index) = scope_diff_index(&self.diff, &comment.scope) {
+                comment.diff_index = index;
+            }
+        }
+        self.persist_reviews();
     }
 
     pub fn reload(&mut self) {
@@ -1348,6 +1396,27 @@ fn review_context(diff: &[String], index: usize) -> Vec<String> {
     let start = hunk_start.max(index.saturating_sub(8));
     let end = hunk_end.min(index.saturating_add(9)).max(start + 1);
     diff[start..end].to_vec()
+}
+
+fn scope_diff_index(diff: &[String], scope: &ReviewScope) -> Option<usize> {
+    match scope {
+        ReviewScope::Commit => (!diff.is_empty()).then(|| commit_comment_anchor(diff)),
+        ReviewScope::File(expected) => diff
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.starts_with("diff --git "))
+            .find_map(|(index, _)| {
+                diff_file_anchor(diff, index)
+                    .filter(|(file, _)| file == expected)
+                    .map(|(_, anchor)| anchor)
+            }),
+        ReviewScope::Line { file, line } => diff.iter().enumerate().find_map(|(index, _)| {
+            (diff_location(diff, index).as_ref() == Some(&(file.clone(), *line))).then_some(index)
+        }),
+        ReviewScope::Range { file, end, .. } => diff.iter().enumerate().find_map(|(index, _)| {
+            (diff_location(diff, index).as_ref() == Some(&(file.clone(), *end))).then_some(index)
+        }),
+    }
 }
 
 fn find_wrapped(

@@ -1,6 +1,7 @@
 mod agent;
 mod app;
 mod git;
+mod review_store;
 mod ui;
 
 use std::{io, time::Duration};
@@ -25,6 +26,7 @@ fn main() -> Result<()> {
 
 fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     let mut app = App::new();
+    app.enable_review_store();
     app.reload();
     let mut needs_draw = true;
 
