@@ -163,6 +163,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
             let half_page = (page / 2).max(1);
             match (key.code, key.modifiers) {
                 (KeyCode::Esc, KeyModifiers::NONE) if app.cancel_agent_dispatch() => {}
+                (KeyCode::Esc, KeyModifiers::NONE) if app.cancel_context_range() => {}
                 (KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('b'), KeyModifiers::NONE) => {
                     app.close_context()
                 }
@@ -206,6 +207,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 (KeyCode::Char('Q'), KeyModifiers::SHIFT) => app.start_understanding_question(),
                 (KeyCode::Char('R'), KeyModifiers::SHIFT) => app.request_guided_reading(),
                 (KeyCode::Char('T'), KeyModifiers::SHIFT) => app.toggle_context_reading_trail(),
+                (KeyCode::Char('V'), KeyModifiers::SHIFT) => app.toggle_context_range(),
                 (KeyCode::Char('s'), KeyModifiers::NONE) => app.open_sessions(),
                 (KeyCode::Char('?'), _) => app.open_help(),
                 _ => {

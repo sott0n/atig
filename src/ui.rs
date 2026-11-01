@@ -139,6 +139,7 @@ fn draw_help(frame: &mut Frame, areas: &[ratatui::layout::Rect]) {
         "[c / ]c            previous / next changed line",
         "Ctrl-o / Ctrl-i    older / newer context location",
         "Q                 ask Agent about context line",
+        "V, move, Q        ask Agent about a code range",
         "R                 build an Agent reading path",
         "T                 expand / collapse reading path",
         ":goto <line>       jump to a diff line",
@@ -247,6 +248,7 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
             text,
             number_width,
             index == app.context_cursor,
+            app.context_line_is_selected(index + 1),
             app.context_change_side(index + 1),
             areas[0].width as usize,
         ));
@@ -291,12 +293,17 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
         app.context_cursor + 1
     };
     let left = app.delivery_message.clone().unwrap_or_else(|| {
-        format!(
-            "{} · {} · line {position}/{} · Q ask · R guide · T trail · [c/]c changes · [r/]r trail · ^o/^i history · b diff",
-            app.context_path,
-            app.context_version,
-            app.context_lines.len()
-        )
+        if app.context_range_start.is_some() {
+            let (start, end) = app.context_selected_range();
+            format!("VISUAL LINES {start}-{end} · Q ask range · V/Esc cancel")
+        } else {
+            format!(
+                "{} · {} · line {position}/{} · Q ask · R guide · T trail · [c/]c changes · [r/]r trail · ^o/^i history · b diff",
+                app.context_path,
+                app.context_version,
+                app.context_lines.len()
+            )
+        }
     });
     let right = if app.context_lines.is_empty() {
         "0%".to_string()
@@ -332,6 +339,14 @@ fn understanding_thread_box(
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            thread
+                .end_line
+                .filter(|end| *end != thread.line)
+                .map(|end| format!(" · LINES {}-{end}", thread.line))
+                .unwrap_or_default(),
+            Style::default().fg(Color::DarkGray),
         ),
     ])];
     for chunk in wrap_comment_body(&thread.question, content_width) {
@@ -426,6 +441,7 @@ fn source_line(
     text: &str,
     number_width: usize,
     selected: bool,
+    in_range: bool,
     changed_side: Option<crate::git::DiffSide>,
     viewport_width: usize,
 ) -> Line<'static> {
@@ -452,6 +468,25 @@ fn source_line(
         line.push_span(Span::styled(
             " ".repeat(viewport_width.saturating_sub(line.width())),
             Style::default().bg(Color::Green),
+        ));
+        line
+    } else if in_range {
+        let mut line = Line::from(vec![
+            Span::styled(
+                prefix,
+                Style::default()
+                    .fg(Color::White)
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                text.to_string(),
+                Style::default().fg(Color::White).bg(Color::DarkGray),
+            ),
+        ]);
+        line.push_span(Span::styled(
+            " ".repeat(viewport_width.saturating_sub(line.width())),
+            Style::default().bg(Color::DarkGray),
         ));
         line
     } else {
@@ -1345,7 +1380,7 @@ mod tests {
 
     #[test]
     fn selected_source_line_includes_a_line_number_and_fills_the_viewport() {
-        let rendered = source_line(12, "let answer = 42;", 3, true, None, 40);
+        let rendered = source_line(12, "let answer = 42;", 3, true, false, None, 40);
 
         assert!(rendered.to_string().contains("  12 │ let answer = 42;"));
         assert_eq!(rendered.width(), 40);
@@ -1358,12 +1393,22 @@ mod tests {
             "let answer = 42;",
             3,
             false,
+            false,
             Some(crate::git::DiffSide::New),
             40,
         );
 
         assert!(rendered.to_string().starts_with("+ 12 │"));
         assert_eq!(rendered.spans[0].style.fg, Some(Color::Green));
+    }
+
+    #[test]
+    fn visually_selected_source_range_fills_the_viewport() {
+        let rendered = source_line(12, "let answer = 42;", 3, false, true, None, 40);
+
+        assert_eq!(rendered.style.bg, None);
+        assert_eq!(rendered.spans[0].style.bg, Some(Color::DarkGray));
+        assert_eq!(rendered.width(), 40);
     }
 
     #[test]
@@ -1394,6 +1439,7 @@ mod tests {
             version: "WORKTREE".into(),
             file: "src/main.rs".into(),
             line: 12,
+            end_line: None,
             question: "Why retry here?".into(),
             agent: "codex:session-1".into(),
             answer: Some("This is the shared request boundary.".into()),

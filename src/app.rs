@@ -12,6 +12,7 @@ use crate::review_store::ReviewStore;
 const MAX_EVENTS_PER_TICK: usize = 256;
 const MAX_UNDERSTANDING_HISTORY: usize = 6;
 const MAX_UNDERSTANDING_MESSAGE_CHARS: usize = 4_000;
+const MAX_CONTEXT_RANGE_LINES: usize = 80;
 const GUIDED_READING_QUESTION: &str = "Build a concise guided reading path for understanding how this code participates in the selected change. Explain this location first, then identify the most important related definitions, callers, state, and tests in the order a human should read them. Keep the path focused.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,6 +142,8 @@ pub struct UnderstandingThread {
     pub version: String,
     pub file: String,
     pub line: usize,
+    #[serde(default)]
+    pub end_line: Option<usize>,
     pub question: String,
     pub agent: String,
     pub answer: Option<String>,
@@ -203,6 +206,7 @@ pub struct App {
     pub context_path: String,
     pub context_lines: Vec<String>,
     pub context_cursor: usize,
+    pub context_range_start: Option<usize>,
     pub context_version: String,
     context_changed_lines: Vec<usize>,
     context_side: git::DiffSide,
@@ -275,6 +279,7 @@ impl App {
             context_path: String::new(),
             context_lines: Vec::new(),
             context_cursor: 0,
+            context_range_start: None,
             context_version: String::new(),
             context_changed_lines: Vec::new(),
             context_side: git::DiffSide::New,
@@ -1122,6 +1127,7 @@ impl App {
             self.context_reading_visited.clear();
             self.show_context_reading_trail = false;
             self.context_jump_direction = None;
+            self.context_range_start = None;
             self.context_back_stack.clear();
             self.context_forward_stack.clear();
             self.view = View::Context;
@@ -1144,6 +1150,7 @@ impl App {
                 self.context_version = file.version;
                 self.context_side = side;
                 self.context_changed_lines = diff_changed_lines(&self.diff, path, side);
+                self.context_range_start = None;
                 true
             }
             Err(error) => {
@@ -1157,6 +1164,41 @@ impl App {
         self.view = View::Diff;
         self.pending_g = false;
         self.context_jump_direction = None;
+        self.context_range_start = None;
+    }
+
+    pub fn toggle_context_range(&mut self) {
+        if self.context_range_start.take().is_none() {
+            self.context_range_start = Some(self.context_cursor);
+            self.message = format!("Code selection started at line {}", self.context_cursor + 1);
+        } else {
+            self.message = "Code selection cleared".into();
+        }
+    }
+
+    pub fn cancel_context_range(&mut self) -> bool {
+        if self.context_range_start.take().is_some() {
+            self.message = "Code selection cleared".into();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn context_selected_range(&self) -> (usize, usize) {
+        let cursor = self.context_cursor + 1;
+        let anchor = self
+            .context_range_start
+            .map(|start| start + 1)
+            .unwrap_or(cursor);
+        (anchor.min(cursor), anchor.max(cursor))
+    }
+
+    pub fn context_line_is_selected(&self, line: usize) -> bool {
+        self.context_range_start.is_some_and(|_| {
+            let (start, end) = self.context_selected_range();
+            (start..=end).contains(&line)
+        })
     }
 
     pub fn move_context(&mut self, amount: isize) {
@@ -1191,7 +1233,7 @@ impl App {
     pub fn begin_context_jump(&mut self, direction: isize) {
         self.pending_g = false;
         let references = self
-            .understanding_threads_at_context(self.context_cursor + 1)
+            .understanding_threads_covering_context(self.context_cursor + 1)
             .into_iter()
             .rev()
             .find(|thread| !thread.references.is_empty())
@@ -1347,6 +1389,11 @@ impl App {
         } else if self.agent_target.is_none() {
             self.message = "Select an agent session with s before asking".into();
             self.delivery_message = Some(self.message.clone());
+        } else if self.context_selected_range().1 - self.context_selected_range().0 + 1
+            > MAX_CONTEXT_RANGE_LINES
+        {
+            self.message = format!("Select at most {MAX_CONTEXT_RANGE_LINES} lines to ask Agent");
+            self.delivery_message = Some(self.message.clone());
         } else {
             self.question_buffer.clear();
             self.input_mode = InputMode::Question;
@@ -1396,11 +1443,17 @@ impl App {
             self.message = "No source available for this question".into();
             return;
         };
-        let line = self.context_cursor + 1;
-        let previous = self.understanding_threads_at_context(line);
+        let (line, end_line) = self.context_selected_range();
+        if end_line - line + 1 > MAX_CONTEXT_RANGE_LINES {
+            self.message = format!("Select at most {MAX_CONTEXT_RANGE_LINES} lines to ask Agent");
+            self.delivery_message = Some(self.message.clone());
+            return;
+        }
+        let previous = self.understanding_threads_for_range(line, end_line);
         let prompt = format_understanding_request(
             &self.context_path,
             line,
+            end_line,
             &question,
             &self.context_lines,
             &previous,
@@ -1411,6 +1464,7 @@ impl App {
             version: self.context_version.clone(),
             file: self.context_path.clone(),
             line,
+            end_line: (end_line != line).then_some(end_line),
             question,
             agent: target.response_label(),
             answer: None,
@@ -1425,6 +1479,7 @@ impl App {
         self.dispatch_cancel = Some(agent::dispatch(target, prompt, tx));
         self.dispatch_rx = Some(rx);
         self.dispatching = true;
+        self.context_range_start = None;
     }
 
     pub fn understanding_threads_at_context(&self, line: usize) -> Vec<&UnderstandingThread> {
@@ -1437,6 +1492,30 @@ impl App {
                     && thread.file == self.context_path
                     && thread.line == line
             })
+            .collect()
+    }
+
+    fn understanding_threads_covering_context(&self, line: usize) -> Vec<&UnderstandingThread> {
+        let source = self.diff_source.as_ref().map(git::DiffSource::id);
+        self.understanding_threads
+            .iter()
+            .filter(|thread| {
+                Some(thread.source.as_str()) == source.as_deref()
+                    && thread.version == self.context_version
+                    && thread.file == self.context_path
+                    && (thread.line..=thread.end_line.unwrap_or(thread.line)).contains(&line)
+            })
+            .collect()
+    }
+
+    fn understanding_threads_for_range(
+        &self,
+        line: usize,
+        end_line: usize,
+    ) -> Vec<&UnderstandingThread> {
+        self.understanding_threads_at_context(line)
+            .into_iter()
+            .filter(|thread| thread.end_line.unwrap_or(thread.line) == end_line)
             .collect()
     }
 
@@ -1597,7 +1676,8 @@ impl App {
                                 .unwrap_or_default()
                             && thread.version == self.context_version
                             && thread.file == self.context_path
-                            && thread.line == self.context_cursor + 1;
+                            && (thread.line..=thread.end_line.unwrap_or(thread.line))
+                                .contains(&(self.context_cursor + 1));
                         thread.answer = Some(answer);
                         thread.references = references.clone();
                     }
@@ -2398,14 +2478,20 @@ fn format_review_request(comments: &[ReviewComment]) -> String {
 fn format_understanding_request(
     file: &str,
     line: usize,
+    end_line: usize,
     question: &str,
     source: &[String],
     previous: &[&UnderstandingThread],
 ) -> String {
-    let start = line.saturating_sub(13);
-    let end = line.saturating_add(12).min(source.len());
+    let start = line.saturating_sub(7);
+    let end = end_line.saturating_add(6).min(source.len());
+    let location = if line == end_line {
+        format!("{file}:{line}")
+    } else {
+        format!("{file}:{line}-{end_line}")
+    };
     let mut prompt = format!(
-        "Help a human understand the existing code at {file}:{line}. Answer the question using read-only inspection only. Do not edit, create, delete, or format files; do not commit or push. Explain the behavior and rationale from the code, cite repository-relative file:line locations for important claims, and say when something cannot be determined from the code. After your normal answer, append up to five important code references in exactly this form, without a Markdown code fence:\n<atig-references>\n[{{\"file\":\"relative/path.rs\",\"line\":123,\"symbol\":\"Type::method\",\"reason\":\"Why this location supports the explanation\"}}]\n</atig-references>\nUse repository-relative post-change locations, an empty symbol when unavailable, and [] when no extra code should be read.\n"
+        "Help a human understand the existing code at {location}. Answer the question using read-only inspection only. Do not edit, create, delete, or format files; do not commit or push. Explain the behavior and rationale from the code, cite repository-relative file:line locations for important claims, and say when something cannot be determined from the code. After your normal answer, append up to five important code references in exactly this form, without a Markdown code fence:\n<atig-references>\n[{{\"file\":\"relative/path.rs\",\"line\":123,\"symbol\":\"Type::method\",\"reason\":\"Why this location supports the explanation\"}}]\n</atig-references>\nUse repository-relative post-change locations, an empty symbol when unavailable, and [] when no extra code should be read.\n"
     );
     let answered = previous
         .iter()
@@ -2424,7 +2510,7 @@ fn format_understanding_request(
         }
     }
     prompt.push_str(&format!(
-        "\nCurrent question: {}\n\nSelected source context:\n```text\n",
+        "\nCurrent question: {}\n\nSelected source context ({location}):\n```text\n",
         truncate_for_prompt(question)
     ));
     for (index, text) in source.iter().enumerate().take(end).skip(start) {
@@ -2589,6 +2675,22 @@ mod tests {
         assert_eq!(app.context_cursor, 2);
         app.close_context();
         assert_eq!(app.view, View::Diff);
+    }
+
+    #[test]
+    fn context_visual_selection_normalizes_its_line_range() {
+        let mut app = App::new();
+        app.context_lines = (1..=20).map(|line| line.to_string()).collect();
+        app.context_cursor = 9;
+        app.toggle_context_range();
+        app.move_context(-4);
+
+        assert_eq!(app.context_selected_range(), (6, 10));
+        assert!(app.context_line_is_selected(6));
+        assert!(app.context_line_is_selected(10));
+        assert!(!app.context_line_is_selected(5));
+        assert!(app.cancel_context_range());
+        assert_eq!(app.context_selected_range(), (6, 6));
     }
 
     #[test]
@@ -3147,6 +3249,7 @@ mod tests {
             version: "WORKTREE".into(),
             file: "src/main.rs".into(),
             line: 12,
+            end_line: None,
             question: "Why is this branch needed?".into(),
             agent: "codex:session-1".into(),
             answer: None,
@@ -3194,6 +3297,7 @@ mod tests {
         let prompt = format_understanding_request(
             "src/main.rs",
             20,
+            20,
             "Why is this branch needed?",
             &source,
             &[],
@@ -3207,9 +3311,29 @@ mod tests {
     }
 
     #[test]
+    fn understanding_prompt_identifies_the_exact_selected_range() {
+        let source = (1..=40)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>();
+        let prompt = format_understanding_request(
+            "src/main.rs",
+            18,
+            22,
+            "How does this block work?",
+            &source,
+            &[],
+        );
+
+        assert!(prompt.contains("src/main.rs:18-22"));
+        assert!(prompt.contains("    18 line 18"));
+        assert!(prompt.contains("    22 line 22"));
+    }
+
+    #[test]
     fn guided_reading_prompt_requests_an_ordered_code_path() {
         let prompt = format_understanding_request(
             "src/main.rs",
+            20,
             20,
             GUIDED_READING_QUESTION,
             &["fn selected() {}".into()],
@@ -3241,6 +3365,7 @@ mod tests {
                 version: "WORKTREE".into(),
                 file: "src/main.rs".into(),
                 line: 20,
+                end_line: None,
                 question: format!("question-{turn}"),
                 agent: "codex:session-1".into(),
                 answer: Some(format!("answer-{turn}")),
@@ -3251,6 +3376,7 @@ mod tests {
 
         let prompt = format_understanding_request(
             "src/main.rs",
+            20,
             20,
             "one more question",
             &["selected".into()],

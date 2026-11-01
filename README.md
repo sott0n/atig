@@ -147,6 +147,10 @@ inspection only—no file edits, formatting, commits, or pushes. The answer is
 shown below that source line and persisted with the review data. Press `s` to
 select a different Agent session. If the working tree changes during an
 understanding request, atig adds a visible safety warning to the answer.
+Press `V`, move with the normal Context View keys, and press `Q` to ask about
+a code block of up to 80 lines. The answer is anchored to that exact range,
+and follow-up context from a different range is kept separate. Press `Esc` or
+`V` before asking to clear the selection.
 Press `Q` again on the same source line to ask a follow-up. atig includes up
 to the six most recent answered turns from that exact file version and line,
 so the Agent can continue the explanation without mixing in unrelated code.

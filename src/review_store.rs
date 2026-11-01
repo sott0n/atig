@@ -117,6 +117,7 @@ mod tests {
             version: "WORKTREE".into(),
             file: "src/main.rs".into(),
             line: 8,
+            end_line: None,
             question: "Why?".into(),
             agent: "codex:session".into(),
             answer: Some("Because.".into()),
@@ -127,6 +128,11 @@ mod tests {
         let loaded = store.load().unwrap();
         assert_eq!(loaded.comments, comments);
         assert_eq!(loaded.understanding_threads, understanding_threads);
+
+        let legacy_thread = r#"{"comments":[],"understanding_threads":[{"source":"WORKTREE","version":"WORKTREE","file":"src/main.rs","line":8,"question":"Why?","agent":"codex:session","answer":null,"references":[]}]}"#;
+        fs::write(&store.path, legacy_thread).unwrap();
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.understanding_threads[0].end_line, None);
 
         fs::write(&store.path, serde_json::to_vec(&comments).unwrap()).unwrap();
         let legacy = store.load().unwrap();
