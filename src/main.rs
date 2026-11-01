@@ -7,7 +7,7 @@ mod ui;
 use std::{io, time::Duration};
 
 use anyhow::Result;
-use app::{App, DiffTarget, InputMode, View};
+use app::{App, DiffTarget, InputMode, RepositorySearchKind, View};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
@@ -224,11 +224,20 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                     app.context_history_forward()
                 }
                 (KeyCode::Char('g'), KeyModifiers::NONE) => app.handle_context_g(),
+                (KeyCode::Char('d'), KeyModifiers::NONE) if app.pending_g => {
+                    app.search_context_symbol(RepositorySearchKind::Definition)
+                }
+                (KeyCode::Char('r'), KeyModifiers::NONE) if app.pending_g => {
+                    app.search_context_symbol(RepositorySearchKind::References)
+                }
+                (KeyCode::Char('w'), KeyModifiers::NONE) => app.move_context_symbol(1),
+                (KeyCode::Char('W'), KeyModifiers::SHIFT) => app.move_context_symbol(-1),
                 (KeyCode::Char('G'), KeyModifiers::SHIFT) | (KeyCode::End, _) => {
                     app.select_context_end()
                 }
                 (KeyCode::Home, _) => {
                     app.context_cursor = 0;
+                    app.context_symbol_column = 0;
                     app.pending_g = false;
                     app.context_jump_direction = None;
                 }

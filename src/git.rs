@@ -365,12 +365,20 @@ pub fn stream_search(
     source: DiffSource,
     side: DiffSide,
     query: String,
+    whole_word: bool,
     sender: Sender<SearchEvent>,
 ) -> Cancellation {
     let cancellation = Cancellation::new();
     let worker_cancellation = cancellation.clone();
     thread::spawn(move || {
-        if let Err(error) = run_git_search(&source, side, &query, &sender, &worker_cancellation) {
+        if let Err(error) = run_git_search(
+            &source,
+            side,
+            &query,
+            whole_word,
+            &sender,
+            &worker_cancellation,
+        ) {
             let _ = sender.send(SearchEvent::Error(error));
         }
     });
@@ -381,6 +389,7 @@ fn run_git_search(
     source: &DiffSource,
     side: DiffSide,
     query: &str,
+    whole_word: bool,
     sender: &Sender<SearchEvent>,
     cancellation: &Cancellation,
 ) -> Result<(), String> {
@@ -388,17 +397,11 @@ fn run_git_search(
     let (cached, tree) = search_tree(source, side);
     let untracked = matches!(source, DiffSource::Worktree) && side == DiffSide::New;
     let mut command = Command::new("git");
-    command.args([
-        "--no-pager",
-        "grep",
-        "-n",
-        "-z",
-        "-I",
-        "-F",
-        "--full-name",
-        "-e",
-        query,
-    ]);
+    command.args(["--no-pager", "grep", "-n", "-z", "-I", "-F", "--full-name"]);
+    if whole_word {
+        command.arg("-w");
+    }
+    command.args(["-e", query]);
     if cached {
         command.arg("--cached");
     }

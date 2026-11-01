@@ -144,6 +144,14 @@ Use `/` to search the current source file, then `n` and `N` to move to the
 next or previous match with wraparound. Search moves the code cursor, so it
 can also extend a `V` selection to a matching line.
 
+The yellow token on the current line is the selected code symbol. Use `w` and
+`W` to select the next or previous identifier, then press `gd` to find likely
+definitions or `gr` to find references. atig performs a whole-word search in
+the repository version being reviewed. Definition candidates are ranked using
+common declaration forms while retaining every match for languages it cannot
+classify. Select a result with `Enter`; symbol jumps participate in
+`Ctrl-o`/`Ctrl-i` context history.
+
 Press `*` to search for literal text across the repository version currently
 being reviewed. Results stream into a Vim-style picker; use `j`/`k` and
 `Enter` to open a match, or `q` to return. Commit diffs search that commit (or

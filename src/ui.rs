@@ -9,7 +9,8 @@ use ratatui::{
 };
 
 use crate::app::{
-    AgentIntent, App, InputMode, ReviewComment, ReviewThreadRole, View, visible_agent_response,
+    AgentIntent, App, InputMode, RepositorySearchKind, ReviewComment, ReviewThreadRole, View,
+    visible_agent_response,
 };
 use crate::git::{CommitLine, HistoryLine, fit_column, format_refs};
 
@@ -147,6 +148,8 @@ fn draw_help(frame: &mut Frame, areas: &[ratatui::layout::Rect]) {
         "[r / ]r            previous / next reading point",
         "[c / ]c            previous / next changed line",
         "m, [m / ]m        toggle / visit code bookmarks",
+        "w / W             next / previous symbol on line",
+        "gd / gr           symbol definitions / references",
         "Ctrl-o / Ctrl-i    older / newer context location",
         "Q                 ask Agent about context line",
         "V, move, Q        ask Agent about a code range",
@@ -269,6 +272,9 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
             SourceGutter {
                 changed_side: app.context_change_side(index + 1),
                 bookmarked: app.context_line_is_bookmarked(index + 1),
+                symbol: (index == app.context_cursor)
+                    .then(|| app.current_context_symbol_char_span())
+                    .flatten(),
             },
             app.context_horizontal_scroll,
             areas[0].width as usize,
@@ -327,11 +333,13 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
             format!("VISUAL LINES {start}-{end} · Q ask range · V/Esc cancel")
         } else {
             format!(
-                "{} · {} · line {position}/{} · col {} · ◆{} · m mark · [m/]m marks · / file · * repo · Q ask · R guide · T trail · b diff",
+                "{} · {} · line {position}/{} · {} · w/W symbol · gd definition · gr references · ◆{} · m mark · / file · * repo · b diff",
                 app.context_path,
                 app.context_version,
                 app.context_lines.len(),
-                app.context_horizontal_scroll + 1,
+                app.current_context_symbol()
+                    .map(|(symbol, _, _)| symbol)
+                    .unwrap_or("no symbol"),
                 app.context_bookmark_count()
             )
         }
@@ -478,6 +486,7 @@ enum SourceSelection {
 struct SourceGutter {
     changed_side: Option<crate::git::DiffSide>,
     bookmarked: bool,
+    symbol: Option<(usize, usize)>,
 }
 
 fn source_line(
@@ -502,19 +511,20 @@ fn source_line(
         viewport_width.saturating_sub(prefix.chars().count()),
     );
     if matches!(selection, SourceSelection::Cursor) {
-        let mut line = Line::from(vec![
-            Span::styled(
-                prefix,
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                visible_text,
-                Style::default().fg(Color::Black).bg(Color::Green),
-            ),
-        ]);
+        let mut spans = vec![Span::styled(
+            prefix,
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )];
+        spans.extend(selected_source_spans(
+            text,
+            horizontal_scroll,
+            viewport_width.saturating_sub(spans[0].width()),
+            gutter.symbol,
+        ));
+        let mut line = Line::from(spans);
         line.push_span(Span::styled(
             " ".repeat(viewport_width.saturating_sub(line.width())),
             Style::default().bg(Color::Green),
@@ -562,6 +572,65 @@ fn source_line(
             Span::raw(visible_text),
         ])
     }
+}
+
+fn selected_source_spans(
+    text: &str,
+    offset: usize,
+    width: usize,
+    symbol: Option<(usize, usize)>,
+) -> Vec<Span<'static>> {
+    let characters = text.chars().collect::<Vec<_>>();
+    let offset = offset.min(characters.len());
+    let left = usize::from(offset > 0);
+    let available_without_left = width.saturating_sub(left);
+    let right = usize::from(characters.len().saturating_sub(offset) > available_without_left);
+    let body_width = width.saturating_sub(left + right);
+    let end = offset.saturating_add(body_width).min(characters.len());
+    let base = Style::default().fg(Color::Black).bg(Color::Green);
+    let selected = Style::default()
+        .fg(Color::Black)
+        .bg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let mut spans = Vec::new();
+    if left > 0 {
+        spans.push(Span::styled("‹", base));
+    }
+    if let Some((symbol_start, symbol_end)) = symbol {
+        let highlight_start = symbol_start.max(offset).min(end);
+        let highlight_end = symbol_end.max(highlight_start).min(end);
+        if offset < highlight_start {
+            spans.push(Span::styled(
+                characters[offset..highlight_start]
+                    .iter()
+                    .collect::<String>(),
+                base,
+            ));
+        }
+        if highlight_start < highlight_end {
+            spans.push(Span::styled(
+                characters[highlight_start..highlight_end]
+                    .iter()
+                    .collect::<String>(),
+                selected,
+            ));
+        }
+        if highlight_end < end {
+            spans.push(Span::styled(
+                characters[highlight_end..end].iter().collect::<String>(),
+                base,
+            ));
+        }
+    } else {
+        spans.push(Span::styled(
+            characters[offset..end].iter().collect::<String>(),
+            base,
+        ));
+    }
+    if right > 0 {
+        spans.push(Span::styled("›", base));
+    }
+    spans
 }
 
 fn visible_source_text(text: &str, offset: usize, width: usize) -> String {
@@ -755,8 +824,13 @@ fn draw_repository_search(frame: &mut Frame, app: &App, areas: &[ratatui::layout
     } else {
         "complete"
     };
+    let search_label = match app.repository_search_kind {
+        RepositorySearchKind::Text => "repo search",
+        RepositorySearchKind::Definition => "definitions",
+        RepositorySearchKind::References => "references",
+    };
     let left = format!(
-        "repo search '{}' · {} matches · {state}",
+        "{search_label} '{}' · {} matches · {state}",
         app.repository_search_query,
         app.repository_search_results.len()
     );
@@ -1547,12 +1621,19 @@ mod tests {
             SourceGutter {
                 changed_side: None,
                 bookmarked: false,
+                symbol: Some((4, 10)),
             },
             0,
             40,
         );
 
         assert!(rendered.to_string().contains("  12 │ let answer = 42;"));
+        assert!(
+            rendered
+                .spans
+                .iter()
+                .any(|span| span.style.bg == Some(Color::Yellow))
+        );
         assert_eq!(rendered.width(), 40);
     }
 
@@ -1566,6 +1647,7 @@ mod tests {
             SourceGutter {
                 changed_side: Some(crate::git::DiffSide::New),
                 bookmarked: false,
+                symbol: None,
             },
             0,
             40,
@@ -1585,6 +1667,7 @@ mod tests {
             SourceGutter {
                 changed_side: None,
                 bookmarked: true,
+                symbol: None,
             },
             0,
             40,
@@ -1604,6 +1687,7 @@ mod tests {
             SourceGutter {
                 changed_side: None,
                 bookmarked: false,
+                symbol: None,
             },
             0,
             40,

@@ -45,6 +45,13 @@ pub enum DiffTarget {
     Intent,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepositorySearchKind {
+    Text,
+    Definition,
+    References,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReviewThreadRole {
     Human,
@@ -237,6 +244,7 @@ pub struct App {
     pub context_path: String,
     pub context_lines: Vec<String>,
     pub context_cursor: usize,
+    pub context_symbol_column: usize,
     pub context_horizontal_scroll: usize,
     pub context_range_start: Option<usize>,
     pub context_version: String,
@@ -266,6 +274,7 @@ pub struct App {
     pub repository_search_results: Vec<SearchMatch>,
     pub repository_search_selected: usize,
     pub repository_search_loading: bool,
+    pub repository_search_kind: RepositorySearchKind,
     pub sessions: Vec<AgentSession>,
     pub session_selected: usize,
     pub sessions_loading: bool,
@@ -319,6 +328,7 @@ impl App {
             context_path: String::new(),
             context_lines: Vec::new(),
             context_cursor: 0,
+            context_symbol_column: 0,
             context_horizontal_scroll: 0,
             context_range_start: None,
             context_version: String::new(),
@@ -348,6 +358,7 @@ impl App {
             repository_search_results: Vec::new(),
             repository_search_selected: 0,
             repository_search_loading: false,
+            repository_search_kind: RepositorySearchKind::Text,
             sessions: Vec::new(),
             session_selected: 0,
             sessions_loading: false,
@@ -636,6 +647,7 @@ impl App {
             }
             (View::Context, Some(index)) => {
                 self.context_cursor = index;
+                self.context_symbol_column = 0;
                 self.pending_g = false;
                 self.context_jump_direction = None;
             }
@@ -671,6 +683,10 @@ impl App {
         if query.is_empty() {
             return;
         }
+        self.search_repository(query, false, RepositorySearchKind::Text);
+    }
+
+    fn search_repository(&mut self, query: String, whole_word: bool, kind: RepositorySearchKind) {
         let Some(source) = self.diff_source.clone() else {
             self.message = "No source available for repository search".into();
             return;
@@ -683,6 +699,7 @@ impl App {
             source,
             self.context_side,
             query.clone(),
+            whole_word,
             tx,
         ));
         self.repository_search_rx = Some(rx);
@@ -690,8 +707,15 @@ impl App {
         self.repository_search_results.clear();
         self.repository_search_selected = 0;
         self.repository_search_loading = true;
+        self.repository_search_kind = kind;
         self.view = View::RepositorySearch;
-        self.message = format!("Searching repository for {query}...");
+        self.message = match kind {
+            RepositorySearchKind::Text => format!("Searching repository for {query}..."),
+            RepositorySearchKind::Definition => {
+                format!("Finding definition candidates for {query}...")
+            }
+            RepositorySearchKind::References => format!("Finding references to {query}..."),
+        };
     }
 
     pub fn drain_repository_search_events(&mut self) -> bool {
@@ -709,6 +733,13 @@ impl App {
                     self.repository_search_rx = None;
                     self.repository_search_cancel = None;
                     self.repository_search_loading = false;
+                    if self.repository_search_kind == RepositorySearchKind::Definition {
+                        let current_path = self.context_path.clone();
+                        let symbol = self.repository_search_query.clone();
+                        self.repository_search_results.sort_by_key(|found| {
+                            definition_candidate_score(found, &symbol, &current_path)
+                        });
+                    }
                     self.message = format!(
                         "{} repository matches",
                         self.repository_search_results.len()
@@ -1344,6 +1375,7 @@ impl App {
                 self.context_cursor = line
                     .saturating_sub(1)
                     .min(file.lines.len().saturating_sub(1));
+                self.context_symbol_column = 0;
                 self.context_lines = file.lines;
                 self.context_version = file.version;
                 self.context_side = side;
@@ -1411,6 +1443,67 @@ impl App {
                 .saturating_add(amount as usize)
                 .min(self.context_lines.len().saturating_sub(1));
         }
+        self.context_symbol_column = 0;
+    }
+
+    pub fn current_context_symbol(&self) -> Option<(&str, usize, usize)> {
+        let line = self.context_lines.get(self.context_cursor)?;
+        symbol_spans(line)
+            .into_iter()
+            .find(|(start, end)| {
+                (*start..*end).contains(&self.context_symbol_column)
+                    || *start >= self.context_symbol_column
+            })
+            .map(|(start, end)| (&line[start..end], start, end))
+    }
+
+    pub fn current_context_symbol_char_span(&self) -> Option<(usize, usize)> {
+        let line = self.context_lines.get(self.context_cursor)?;
+        self.current_context_symbol()
+            .map(|(_, start, end)| (line[..start].chars().count(), line[..end].chars().count()))
+    }
+
+    pub fn move_context_symbol(&mut self, direction: isize) {
+        let Some(line) = self.context_lines.get(self.context_cursor) else {
+            self.message = "No symbol on this line".into();
+            return;
+        };
+        let spans = symbol_spans(line);
+        if spans.is_empty() {
+            self.message = "No symbol on this line".into();
+            return;
+        }
+        let current = spans.iter().position(|(start, end)| {
+            (*start..*end).contains(&self.context_symbol_column)
+                || *start >= self.context_symbol_column
+        });
+        let destination = if direction > 0 {
+            current
+                .map(|index| (index + 1).min(spans.len() - 1))
+                .unwrap_or(0)
+        } else {
+            current.and_then(|index| index.checked_sub(1)).unwrap_or(0)
+        };
+        self.context_symbol_column = spans[destination].0;
+        let symbol_character = line[..self.context_symbol_column].chars().count();
+        self.context_horizontal_scroll = self.context_horizontal_scroll.min(symbol_character);
+        self.pending_g = false;
+        self.context_jump_direction = None;
+        self.message = format!(
+            "Symbol: {}",
+            &line[spans[destination].0..spans[destination].1]
+        );
+    }
+
+    pub fn search_context_symbol(&mut self, kind: RepositorySearchKind) {
+        let Some((symbol, _, _)) = self.current_context_symbol() else {
+            self.message = "No symbol selected on this line".into();
+            self.pending_g = false;
+            return;
+        };
+        let symbol = symbol.to_string();
+        self.pending_g = false;
+        self.search_repository(symbol, true, kind);
     }
 
     pub fn move_context_horizontal(&mut self, amount: isize) {
@@ -1456,6 +1549,7 @@ impl App {
         self.context_jump_direction = None;
         if self.pending_g {
             self.context_cursor = 0;
+            self.context_symbol_column = 0;
             self.pending_g = false;
         } else {
             self.pending_g = true;
@@ -1464,6 +1558,7 @@ impl App {
 
     pub fn select_context_end(&mut self) {
         self.context_cursor = self.context_lines.len().saturating_sub(1);
+        self.context_symbol_column = 0;
         self.pending_g = false;
         self.context_jump_direction = None;
     }
@@ -1543,6 +1638,7 @@ impl App {
         };
         if let Some(line) = destination {
             self.context_cursor = line.saturating_sub(1);
+            self.context_symbol_column = 0;
             self.message = format!("Change at {}:{line}", self.context_path);
         } else {
             self.message = if direction > 0 {
@@ -2516,6 +2612,101 @@ impl Drop for App {
     }
 }
 
+fn symbol_spans(line: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start = None;
+    for (index, character) in line
+        .char_indices()
+        .chain(std::iter::once((line.len(), ' ')))
+    {
+        let continues = character == '_' || character.is_alphanumeric();
+        match (start, continues) {
+            (None, true) if character == '_' || character.is_alphabetic() => start = Some(index),
+            (Some(begin), false) => {
+                let symbol = &line[begin..index];
+                if !is_code_keyword(symbol) {
+                    spans.push((begin, index));
+                }
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    spans
+}
+
+fn is_code_keyword(symbol: &str) -> bool {
+    matches!(
+        symbol,
+        "as" | "async"
+            | "await"
+            | "break"
+            | "class"
+            | "const"
+            | "continue"
+            | "def"
+            | "do"
+            | "else"
+            | "enum"
+            | "extern"
+            | "false"
+            | "fn"
+            | "for"
+            | "function"
+            | "if"
+            | "impl"
+            | "import"
+            | "in"
+            | "let"
+            | "loop"
+            | "match"
+            | "mod"
+            | "move"
+            | "mut"
+            | "new"
+            | "null"
+            | "pub"
+            | "return"
+            | "self"
+            | "static"
+            | "struct"
+            | "super"
+            | "trait"
+            | "true"
+            | "type"
+            | "use"
+            | "var"
+            | "where"
+            | "while"
+    )
+}
+
+fn definition_candidate_score(found: &SearchMatch, symbol: &str, current_path: &str) -> (u8, u8) {
+    let trimmed = found.text.trim_start();
+    let declaration = [
+        "fn ",
+        "struct ",
+        "enum ",
+        "trait ",
+        "type ",
+        "const ",
+        "static ",
+        "class ",
+        "def ",
+        "function ",
+        "interface ",
+        "func ",
+        "let ",
+        "var ",
+    ]
+    .iter()
+    .any(|keyword| trimmed.contains(&format!("{keyword}{symbol}")));
+    (
+        u8::from(!declaration),
+        u8::from(found.path.as_str() != current_path),
+    )
+}
+
 fn diff_location(diff: &[String], cursor: usize) -> Option<(String, usize)> {
     diff_context_location(diff, cursor).map(|(file, line, _)| (file, line))
 }
@@ -3050,6 +3241,52 @@ mod tests {
         assert_eq!(app.context_horizontal_scroll, 9);
         app.reset_context_horizontal();
         assert_eq!(app.context_horizontal_scroll, 0);
+    }
+
+    #[test]
+    fn context_symbol_navigation_skips_keywords_and_selects_identifiers() {
+        let mut app = App::new();
+        app.context_lines = vec!["pub fn render_widget(frame: &mut Frame)".into()];
+
+        assert_eq!(
+            app.current_context_symbol().map(|(symbol, _, _)| symbol),
+            Some("render_widget")
+        );
+        app.move_context_symbol(1);
+        assert_eq!(
+            app.current_context_symbol().map(|(symbol, _, _)| symbol),
+            Some("frame")
+        );
+        app.move_context_symbol(1);
+        assert_eq!(
+            app.current_context_symbol().map(|(symbol, _, _)| symbol),
+            Some("Frame")
+        );
+        app.move_context_symbol(-1);
+        assert_eq!(
+            app.current_context_symbol().map(|(symbol, _, _)| symbol),
+            Some("frame")
+        );
+    }
+
+    #[test]
+    fn definition_candidates_rank_declarations_before_references() {
+        let mut matches = [
+            SearchMatch {
+                path: "src/use.rs".into(),
+                line: 2,
+                text: "render_widget(frame);".into(),
+            },
+            SearchMatch {
+                path: "src/ui.rs".into(),
+                line: 8,
+                text: "pub fn render_widget(frame: Frame) {".into(),
+            },
+        ];
+        matches
+            .sort_by_key(|found| definition_candidate_score(found, "render_widget", "src/use.rs"));
+
+        assert_eq!(matches[0].path, "src/ui.rs");
     }
 
     #[test]
