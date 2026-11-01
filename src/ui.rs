@@ -286,6 +286,10 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
         frame.set_cursor_position((cursor_x, areas[1].y));
         return;
     }
+    if app.input_mode == InputMode::Search {
+        draw_search_prompt(frame, app, areas[1]);
+        return;
+    }
 
     let position = if app.context_lines.is_empty() {
         0
@@ -298,7 +302,7 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
             format!("VISUAL LINES {start}-{end} · Q ask range · V/Esc cancel")
         } else {
             format!(
-                "{} · {} · line {position}/{} · Q ask · R guide · T trail · [c/]c changes · [r/]r trail · ^o/^i history · b diff",
+                "{} · {} · line {position}/{} · / search · Q ask · R guide · T trail · [c/]c changes · [r/]r trail · ^o/^i history · b diff",
                 app.context_path,
                 app.context_version,
                 app.context_lines.len()

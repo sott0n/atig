@@ -209,6 +209,9 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 (KeyCode::Char('T'), KeyModifiers::SHIFT) => app.toggle_context_reading_trail(),
                 (KeyCode::Char('V'), KeyModifiers::SHIFT) => app.toggle_context_range(),
                 (KeyCode::Char('s'), KeyModifiers::NONE) => app.open_sessions(),
+                (KeyCode::Char('/'), KeyModifiers::NONE) => app.start_search(),
+                (KeyCode::Char('n'), KeyModifiers::NONE) => app.repeat_search(1),
+                (KeyCode::Char('N'), KeyModifiers::SHIFT) => app.repeat_search(-1),
                 (KeyCode::Char('?'), _) => app.open_help(),
                 _ => {
                     app.pending_g = false;

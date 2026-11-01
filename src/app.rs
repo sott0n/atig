@@ -563,7 +563,13 @@ impl App {
             View::Diff => find_wrapped(self.diff.len(), self.diff_scroll, direction, |index| {
                 self.diff[index].to_lowercase().contains(&query)
             }),
-            View::Context | View::Comments | View::Files | View::Help | View::Sessions => None,
+            View::Context => find_wrapped(
+                self.context_lines.len(),
+                self.context_cursor,
+                direction,
+                |index| self.context_lines[index].to_lowercase().contains(&query),
+            ),
+            View::Comments | View::Files | View::Help | View::Sessions => None,
         };
         match (self.view, destination) {
             (View::History, Some(index)) => self.selected = Some(index),
@@ -571,6 +577,11 @@ impl App {
                 self.diff_scroll = index;
                 self.diff_comment_selected = None;
                 self.diff_thread_selected = None;
+            }
+            (View::Context, Some(index)) => {
+                self.context_cursor = index;
+                self.pending_g = false;
+                self.context_jump_direction = None;
             }
             (_, Some(_)) => {}
             (_, None) => self.message = format!("Pattern not found: {}", self.search_query),
@@ -3481,7 +3492,7 @@ mod tests {
     }
 
     #[test]
-    fn search_wraps_in_history_and_diff() {
+    fn search_wraps_in_history_diff_and_context() {
         let mut app = app_with_history();
         app.search_query = "two".into();
         app.repeat_search(1);
@@ -3496,5 +3507,14 @@ mod tests {
 
         app.repeat_search(-1);
         assert_eq!(app.diff_scroll, 1);
+
+        app.view = View::Context;
+        app.context_lines = vec!["target first".into(), "middle".into(), "TARGET last".into()];
+        app.context_cursor = 2;
+        app.search_query = "target".into();
+        app.repeat_search(1);
+        assert_eq!(app.context_cursor, 0);
+        app.repeat_search(-1);
+        assert_eq!(app.context_cursor, 2);
     }
 }

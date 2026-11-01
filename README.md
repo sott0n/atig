@@ -135,6 +135,10 @@ as the diff. Changed lines have a green `+` or red `-` gutter marker; use `]c`
 and `[c` to move between changes in the current file. Press `b`, `Esc`, or `q`
 to return to the same diff position.
 
+Use `/` to search the current source file, then `n` and `N` to move to the
+next or previous match with wraparound. Search moves the code cursor, so it
+can also extend a `V` selection to a matching line.
+
 When the selected Agent Intent includes a Reading Trail, the Context View
 shows why each related location matters. Use `]r` and `[r` to follow the trail
 forward and backward. atig opens only safe repository-relative text files;
