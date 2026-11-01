@@ -1,10 +1,14 @@
 use std::{
     cmp::Reverse,
     fs,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::mpsc::Sender,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::Sender,
+    },
     thread,
     time::UNIX_EPOCH,
 };
@@ -40,8 +44,18 @@ pub enum SessionListEvent {
 }
 
 pub enum DispatchEvent {
+    Progress(String),
     Done(String),
     Error(String),
+}
+
+#[derive(Clone)]
+pub struct DispatchCancellation(Arc<AtomicBool>);
+
+impl DispatchCancellation {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
 }
 
 pub fn discover_sessions(sender: Sender<SessionListEvent>) {
@@ -286,11 +300,22 @@ fn truncate(value: &str, width: usize) -> String {
     result
 }
 
-pub fn dispatch(target: AgentTarget, prompt: String, sender: Sender<DispatchEvent>) {
+pub fn dispatch(
+    target: AgentTarget,
+    prompt: String,
+    sender: Sender<DispatchEvent>,
+) -> DispatchCancellation {
+    let cancellation = DispatchCancellation(Arc::new(AtomicBool::new(false)));
+    let worker_cancellation = cancellation.clone();
     thread::spawn(move || {
+        let _ = sender.send(DispatchEvent::Progress("Agent started".into()));
         let result = match target.provider {
-            AgentProvider::Codex => dispatch_codex(&target.session_id, &prompt),
-            AgentProvider::Claude => dispatch_claude(&target.session_id, &prompt),
+            AgentProvider::Codex => {
+                dispatch_codex(&target.session_id, &prompt, &sender, &worker_cancellation)
+            }
+            AgentProvider::Claude => {
+                dispatch_claude(&target.session_id, &prompt, &sender, &worker_cancellation)
+            }
             AgentProvider::Other(_) => {
                 Err("The other provider requires a custom adapter; review was not sent".into())
             }
@@ -301,9 +326,15 @@ pub fn dispatch(target: AgentTarget, prompt: String, sender: Sender<DispatchEven
         };
         let _ = sender.send(event);
     });
+    cancellation
 }
 
-fn dispatch_codex(session_id: &str, prompt: &str) -> Result<String, String> {
+fn dispatch_codex(
+    session_id: &str,
+    prompt: &str,
+    sender: &Sender<DispatchEvent>,
+    cancellation: &DispatchCancellation,
+) -> Result<String, String> {
     let mut child = codex_fork_command(session_id)
         .spawn()
         .map_err(|error| format!("Failed to start Codex: {error}"))?;
@@ -313,7 +344,7 @@ fn dispatch_codex(session_id: &str, prompt: &str) -> Result<String, String> {
         .ok_or_else(|| "Failed to open Codex input".to_string())?
         .write_all(prompt.as_bytes())
         .map_err(|error| format!("Failed to send review to Codex: {error}"))?;
-    finish_dispatch(child, "Codex")
+    finish_dispatch(child, "Codex", sender, cancellation)
 }
 
 fn codex_fork_command(session_id: &str) -> Command {
@@ -326,11 +357,16 @@ fn codex_fork_command(session_id: &str) -> Command {
     command
 }
 
-fn dispatch_claude(session_id: &str, prompt: &str) -> Result<String, String> {
+fn dispatch_claude(
+    session_id: &str,
+    prompt: &str,
+    sender: &Sender<DispatchEvent>,
+    cancellation: &DispatchCancellation,
+) -> Result<String, String> {
     let child = claude_command(session_id, prompt)
         .spawn()
         .map_err(|error| format!("Failed to start Claude: {error}"))?;
-    finish_dispatch(child, "Claude")
+    finish_dispatch(child, "Claude", sender, cancellation)
 }
 
 fn claude_command(session_id: &str, prompt: &str) -> Command {
@@ -350,17 +386,50 @@ fn claude_command(session_id: &str, prompt: &str) -> Command {
     command
 }
 
-fn finish_dispatch(child: std::process::Child, name: &str) -> Result<String, String> {
-    let output = child
-        .wait_with_output()
-        .map_err(|error| format!("Failed to wait for {name}: {error}"))?;
-    if output.status.success() {
-        return Ok(normalize_agent_response(&output.stdout));
+fn finish_dispatch(
+    mut child: std::process::Child,
+    name: &str,
+    sender: &Sender<DispatchEvent>,
+    cancellation: &DispatchCancellation,
+) -> Result<String, String> {
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("Failed to read {name} output"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| format!("Failed to read {name} errors"))?;
+    let stderr_reader = thread::spawn(move || {
+        let mut error = String::new();
+        let _ = BufReader::new(stderr).read_to_string(&mut error);
+        error
+    });
+    let mut output = Vec::new();
+    for line in BufReader::new(stdout).split(b'\n') {
+        if cancellation.0.load(Ordering::Acquire) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("Agent delivery cancelled".into());
+        }
+        let line = line.map_err(|error| format!("Failed to read {name} output: {error}"))?;
+        if !line.is_empty() {
+            let progress = normalize_agent_response(&line);
+            let _ = sender.send(DispatchEvent::Progress(progress));
+        }
+        output.extend_from_slice(&line);
+        output.push(b'\n');
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let status = child
+        .wait()
+        .map_err(|error| format!("Failed to wait for {name}: {error}"))?;
+    let stderr = stderr_reader.join().unwrap_or_default();
+    if status.success() {
+        return Ok(normalize_agent_response(&output));
+    }
     let stderr = stderr.trim();
     if stderr.is_empty() {
-        Err(format!("{name} exited with {}", output.status))
+        Err(format!("{name} exited with {status}"))
     } else {
         Err(format!("{name}: {stderr}"))
     }

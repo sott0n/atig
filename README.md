@@ -116,6 +116,7 @@ the selected agent session.
 | `Enter` | Edit a review comment, or reply to a selected thread message |
 | `v` | Open the review comment list |
 | `S` | Send the selected inline comment, or all comments when a code line is selected |
+| `X` | Open the working-tree diff produced by the last Agent run |
 | `s` | Open the repository agent-session picker |
 | `r` | Reload the current commit diff |
 | `:` | Open command input |
@@ -194,6 +195,10 @@ After the CLI finishes, its response is appended to the inline review thread.
 Use `j`/`k` to select the Agent response, press `Enter` to write a follow-up,
 then press `S` on that thread to send the complete conversation context back
 to the selected Agent session.
+While the Agent is running, output is reflected in the status line; press
+`Esc` to request cancellation. On completion, atig compares the working tree
+with its pre-send snapshot and appends the changed-file verification to the
+Agent response. Press `X` to open those changes as a working-tree diff.
 
 Review threads are restored across `atig` runs from
 `.git/atig/reviews.json`. Saved line and range reviews are re-anchored from
@@ -227,8 +232,8 @@ still streamed; there is no artificial commit limit.
 
 - Only committed changes can be reviewed; working-tree and staged diffs do not
   yet have dedicated views.
-- Agent responses appear after the CLI command finishes; token-by-token
-  streaming is not implemented.
+- Claude's non-interactive CLI may buffer output even though atig consumes
+  Agent output incrementally.
 - The generic `other` agent adapter is not implemented.
 - The Git graph targets the common `tig` experience but is not yet guaranteed
   to reproduce every complex octopus or criss-cross graph exactly.

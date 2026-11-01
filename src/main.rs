@@ -154,6 +154,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
             let page = terminal_height.saturating_sub(1).max(1) as isize;
             let half_page = (page / 2).max(1);
             match (key.code, key.modifiers) {
+                (KeyCode::Esc, KeyModifiers::NONE) if app.cancel_agent_dispatch() => {}
                 (KeyCode::Esc, KeyModifiers::NONE) if app.cancel_range_selection() => {}
                 (KeyCode::Esc | KeyCode::Char('q'), KeyModifiers::NONE) => app.close_diff(),
                 (KeyCode::Char('j') | KeyCode::Down, KeyModifiers::NONE) => {
@@ -209,6 +210,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 (KeyCode::Char('v'), KeyModifiers::NONE) => app.open_comments(),
                 (KeyCode::Char(':'), KeyModifiers::NONE) => app.start_command(),
                 (KeyCode::Char('S'), _) => app.request_send_review(),
+                (KeyCode::Char('X'), KeyModifiers::SHIFT) => app.view_agent_changes(),
                 (KeyCode::Char('s'), KeyModifiers::NONE) => app.open_sessions(),
                 (KeyCode::Char('/'), KeyModifiers::NONE) => app.start_search(),
                 (KeyCode::Char('n'), KeyModifiers::NONE) => app.repeat_search(1),

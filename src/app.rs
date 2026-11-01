@@ -77,6 +77,13 @@ impl ReviewScope {
             Self::Range { file, start, end } => format!("line range: {file}:{start}-{end}"),
         }
     }
+
+    fn file(&self) -> Option<&str> {
+        match self {
+            Self::File(file) | Self::Line { file, .. } | Self::Range { file, .. } => Some(file),
+            Self::Commit => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,6 +142,9 @@ pub struct App {
     dispatched_comments: Vec<ReviewComment>,
     dispatched_agent: Option<String>,
     dispatch_rx: Option<Receiver<DispatchEvent>>,
+    dispatch_cancel: Option<agent::DispatchCancellation>,
+    dispatch_snapshot: Option<git::ChangeSnapshot>,
+    pub last_agent_changes: Vec<String>,
     session_rx: Option<Receiver<SessionListEvent>>,
     help_return: View,
     sessions_return: View,
@@ -186,6 +196,9 @@ impl App {
             dispatched_comments: Vec::new(),
             dispatched_agent: None,
             dispatch_rx: None,
+            dispatch_cancel: None,
+            dispatch_snapshot: None,
+            last_agent_changes: Vec::new(),
             session_rx: None,
             help_return: View::History,
             sessions_return: View::History,
@@ -959,10 +972,11 @@ impl App {
             .map(|comment| vec![comment])
             .unwrap_or_else(|| self.comments.clone());
         let prompt = format_review_request(&comments);
+        self.dispatch_snapshot = git::change_snapshot().ok();
         let (tx, rx) = mpsc::channel();
         self.dispatched_agent = Some(target.response_label());
         self.delivery_message = Some(format!("Sending review to {}...", target.short_label()));
-        agent::dispatch(target, prompt, tx);
+        self.dispatch_cancel = Some(agent::dispatch(target, prompt, tx));
         self.dispatched_comments = comments;
         self.pending_send_comment_index = None;
         self.dispatch_rx = Some(rx);
@@ -979,11 +993,48 @@ impl App {
                 DispatchEvent::Error("Agent delivery ended unexpectedly".into())
             }
         };
-        self.dispatch_rx = None;
-        self.dispatching = false;
         match event {
-            DispatchEvent::Done(response) => {
+            DispatchEvent::Progress(progress) => {
+                self.message = progress.clone();
+                self.delivery_message = Some(format!("Agent: {progress}"));
+            }
+            DispatchEvent::Done(mut response) => {
+                self.dispatch_rx = None;
+                self.dispatch_cancel = None;
+                self.dispatching = false;
                 let delivered = std::mem::take(&mut self.dispatched_comments);
+                if let Some(before) = self.dispatch_snapshot.take()
+                    && let Ok(after) = git::change_snapshot()
+                {
+                    self.last_agent_changes = changed_paths(&before, &after);
+                    let requested_files = delivered
+                        .iter()
+                        .filter_map(|comment| comment.scope.file())
+                        .collect::<Vec<_>>();
+                    let target_changed = requested_files.iter().any(|file| {
+                        self.last_agent_changes
+                            .iter()
+                            .any(|changed| changed == file)
+                    });
+                    let verification = if self.last_agent_changes.is_empty() {
+                        "Verification: no new working-tree changes detected.".to_string()
+                    } else if requested_files.is_empty() {
+                        format!(
+                            "Verification: changed {} file(s): {}.",
+                            self.last_agent_changes.len(),
+                            self.last_agent_changes.join(", ")
+                        )
+                    } else {
+                        format!(
+                            "Verification: changed {} file(s); requested file changed: {}. Files: {}.",
+                            self.last_agent_changes.len(),
+                            if target_changed { "yes" } else { "no" },
+                            self.last_agent_changes.join(", ")
+                        )
+                    };
+                    response.push_str("\n\n");
+                    response.push_str(&verification);
+                }
                 let agent = self
                     .dispatched_agent
                     .take()
@@ -1018,13 +1069,35 @@ impl App {
                 self.persist_reviews();
             }
             DispatchEvent::Error(error) => {
+                self.dispatch_rx = None;
+                self.dispatch_cancel = None;
+                self.dispatching = false;
                 self.dispatched_comments.clear();
                 self.dispatched_agent = None;
+                self.dispatch_snapshot = None;
                 self.message = error.clone();
                 self.delivery_message = Some(format!("Send failed: {error}"));
             }
         }
         true
+    }
+
+    pub fn cancel_agent_dispatch(&mut self) -> bool {
+        let Some(cancellation) = self.dispatch_cancel.take() else {
+            return false;
+        };
+        cancellation.cancel();
+        self.message = "Cancelling Agent...".into();
+        self.delivery_message = Some(self.message.clone());
+        true
+    }
+
+    pub fn view_agent_changes(&mut self) {
+        if self.last_agent_changes.is_empty() {
+            self.message = "No Agent changes detected".into();
+            return;
+        }
+        self.open_worktree_diff();
     }
 
     pub fn drain_diff_events(&mut self) -> bool {
@@ -1396,6 +1469,20 @@ fn review_context(diff: &[String], index: usize) -> Vec<String> {
     let start = hunk_start.max(index.saturating_sub(8));
     let end = hunk_end.min(index.saturating_add(9)).max(start + 1);
     diff[start..end].to_vec()
+}
+
+fn changed_paths(before: &git::ChangeSnapshot, after: &git::ChangeSnapshot) -> Vec<String> {
+    let mut paths = before
+        .keys()
+        .chain(after.keys())
+        .cloned()
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths.dedup();
+    paths
+        .into_iter()
+        .filter(|path| before.get(path) != after.get(path))
+        .collect()
 }
 
 fn scope_diff_index(diff: &[String], scope: &ReviewScope) -> Option<usize> {
@@ -1956,6 +2043,43 @@ mod tests {
         assert_eq!(app.diff_comment_selected, Some(0));
         assert_eq!(app.diff_thread_selected, Some(0));
         assert_eq!(app.message, "Agent response received");
+    }
+
+    #[test]
+    fn dispatch_progress_keeps_the_agent_run_active() {
+        let mut app = App::new();
+        let (tx, rx) = mpsc::channel();
+        app.dispatching = true;
+        app.dispatch_rx = Some(rx);
+        tx.send(DispatchEvent::Progress("Running tests...".into()))
+            .unwrap();
+
+        assert!(app.drain_dispatch_events());
+        assert!(app.dispatching);
+        assert!(app.dispatch_rx.is_some());
+        assert_eq!(
+            app.delivery_message.as_deref(),
+            Some("Agent: Running tests...")
+        );
+    }
+
+    #[test]
+    fn verification_detects_added_changed_and_removed_paths() {
+        let before = git::ChangeSnapshot::from([
+            ("changed.rs".into(), 1),
+            ("removed.rs".into(), 2),
+            ("same.rs".into(), 3),
+        ]);
+        let after = git::ChangeSnapshot::from([
+            ("added.rs".into(), 4),
+            ("changed.rs".into(), 5),
+            ("same.rs".into(), 3),
+        ]);
+
+        assert_eq!(
+            changed_paths(&before, &after),
+            ["added.rs", "changed.rs", "removed.rs"]
+        );
     }
 
     #[test]

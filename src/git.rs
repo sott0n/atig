@@ -1,4 +1,7 @@
 use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    hash::{DefaultHasher, Hash, Hasher},
     io::{BufRead, BufReader, Read},
     process::{Command, Stdio},
     sync::{
@@ -126,6 +129,44 @@ pub enum DiffSource {
     Commit(String),
     Worktree,
     Staged,
+}
+
+pub type ChangeSnapshot = BTreeMap<String, u64>;
+
+pub fn change_snapshot() -> Result<ChangeSnapshot, String> {
+    let mut paths = BTreeSet::new();
+    for arguments in [
+        ["diff", "HEAD", "--name-only", "-z"].as_slice(),
+        ["ls-files", "--others", "--exclude-standard", "-z"].as_slice(),
+    ] {
+        let output = Command::new("git")
+            .args(arguments)
+            .output()
+            .map_err(|error| format!("Cannot inspect working tree: {error}"))?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        }
+        paths.extend(
+            output
+                .stdout
+                .split(|byte| *byte == 0)
+                .filter(|path| !path.is_empty())
+                .map(|path| String::from_utf8_lossy(path).into_owned()),
+        );
+    }
+
+    Ok(paths
+        .into_iter()
+        .map(|path| {
+            let mut hasher = DefaultHasher::new();
+            path.hash(&mut hasher);
+            match fs::read(&path) {
+                Ok(contents) => contents.hash(&mut hasher),
+                Err(_) => "<deleted>".hash(&mut hasher),
+            }
+            (path, hasher.finish())
+        })
+        .collect())
 }
 
 impl DiffSource {

@@ -130,6 +130,7 @@ fn draw_help(frame: &mut Frame, areas: &[ratatui::layout::Rect]) {
         "v                 view review comments",
         "s                 select an agent session",
         "S                 send review comments",
+        "X                 view Agent changes",
         ":                 command",
         "?                 toggle this help",
     ]
@@ -453,7 +454,7 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
             "Enter edit  S send"
         };
         format!(
-            "Review #{:02} - {action} - {} comments{}{}",
+            "Review #{:02} - {action} - X changes - {} comments{}{}",
             comment_index + 1,
             app.comments.len(),
             if app.dispatching { " - sending" } else { "" },
