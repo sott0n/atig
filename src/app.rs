@@ -12,6 +12,7 @@ use crate::review_store::ReviewStore;
 const MAX_EVENTS_PER_TICK: usize = 256;
 const MAX_UNDERSTANDING_HISTORY: usize = 6;
 const MAX_UNDERSTANDING_MESSAGE_CHARS: usize = 4_000;
+const GUIDED_READING_QUESTION: &str = "Build a concise guided reading path for understanding how this code participates in the selected change. Explain this location first, then identify the most important related definitions, callers, state, and tests in the order a human should read them. Keep the path focused.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
@@ -1348,13 +1349,28 @@ impl App {
             self.cancel_understanding_question();
             return;
         }
+        self.question_buffer.clear();
+        self.input_mode = InputMode::Normal;
+        self.dispatch_understanding(question, "Asking");
+    }
+
+    pub fn request_guided_reading(&mut self) {
+        self.dispatch_understanding(GUIDED_READING_QUESTION.into(), "Building reading path with");
+    }
+
+    fn dispatch_understanding(&mut self, question: String, progress: &str) {
+        if self.dispatching {
+            self.message = "An Agent request is already running".into();
+            self.delivery_message = Some(self.message.clone());
+            return;
+        }
         let Some(target) = self.agent_target.clone() else {
-            self.cancel_understanding_question();
+            self.message = "Select an agent session with s before asking".into();
+            self.delivery_message = Some(self.message.clone());
             return;
         };
         let Some(source) = self.diff_source.as_ref().map(git::DiffSource::id) else {
             self.message = "No source available for this question".into();
-            self.cancel_understanding_question();
             return;
         };
         let line = self.context_cursor + 1;
@@ -1382,12 +1398,10 @@ impl App {
         self.dispatch_snapshot = git::change_snapshot().ok();
         self.dispatch_purpose = Some(DispatchPurpose::Understanding(thread_index));
         self.dispatched_agent = Some(target.response_label());
-        self.delivery_message = Some(format!("Asking {}...", target.short_label()));
+        self.delivery_message = Some(format!("{progress} {}...", target.short_label()));
         self.dispatch_cancel = Some(agent::dispatch(target, prompt, tx));
         self.dispatch_rx = Some(rx);
         self.dispatching = true;
-        self.question_buffer.clear();
-        self.input_mode = InputMode::Normal;
     }
 
     pub fn understanding_threads_at_context(&self, line: usize) -> Vec<&UnderstandingThread> {
@@ -1547,8 +1561,11 @@ impl App {
                         ));
                     }
                     let (answer, references) = parse_understanding_response(&response);
+                    let reference_count = references.len();
                     let mut active_context = false;
+                    let mut guided_reading = false;
                     if let Some(thread) = self.understanding_threads.get_mut(index) {
+                        guided_reading = thread.question == GUIDED_READING_QUESTION;
                         active_context = thread.source
                             == self
                                 .diff_source
@@ -1567,7 +1584,14 @@ impl App {
                     }
                     self.dispatched_agent = None;
                     self.dispatched_comments.clear();
-                    self.message = "Agent explanation received".into();
+                    self.message = if guided_reading {
+                        format!(
+                            "Agent reading path received · {} locations",
+                            reference_count
+                        )
+                    } else {
+                        "Agent explanation received".into()
+                    };
                     self.delivery_message = Some(self.message.clone());
                     self.persist_reviews();
                     return true;
@@ -3152,6 +3176,33 @@ mod tests {
         assert!(prompt.contains("Current question: Why is this branch needed?"));
         assert!(!prompt.contains("     1 line 1"));
         assert!(prompt.contains("    20 line 20"));
+    }
+
+    #[test]
+    fn guided_reading_prompt_requests_an_ordered_code_path() {
+        let prompt = format_understanding_request(
+            "src/main.rs",
+            20,
+            GUIDED_READING_QUESTION,
+            &["fn selected() {}".into()],
+            &[],
+        );
+
+        assert!(prompt.contains("in the order a human should read them"));
+        assert!(prompt.contains("up to five important code references"));
+        assert!(prompt.contains("Do not edit, create, delete, or format files"));
+    }
+
+    #[test]
+    fn guided_reading_requires_an_agent_session() {
+        let mut app = App::new();
+        app.request_guided_reading();
+
+        assert!(!app.dispatching);
+        assert_eq!(
+            app.delivery_message.as_deref(),
+            Some("Select an agent session with s before asking")
+        );
     }
 
     #[test]

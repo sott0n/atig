@@ -155,6 +155,12 @@ Agent answers can include up to five explicit code references. They appear as
 source line to move through the referenced code. atig hides the transport
 manifest and rejects unsafe or invalid reference paths.
 
+Press `R` to ask the selected Agent to build a focused reading path without
+typing a question. The Agent explains the current location, then identifies
+up to five related definitions, callers, state, or tests in the order a human
+should read them. The result is persisted like a normal understanding answer
+and can be followed immediately with `]r` and `[r`.
+
 Context navigation keeps a Vim-style location history. After following a
 Reading Trail or answer reference, press `Ctrl-o` to return to the previous
 code location and `Ctrl-i` to move forward again. Because many terminals send

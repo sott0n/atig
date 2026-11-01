@@ -139,6 +139,7 @@ fn draw_help(frame: &mut Frame, areas: &[ratatui::layout::Rect]) {
         "[c / ]c            previous / next changed line",
         "Ctrl-o / Ctrl-i    older / newer context location",
         "Q                 ask Agent about context line",
+        "R                 build an Agent reading path",
         ":goto <line>       jump to a diff line",
         "/, n, N           search / next / previous",
         "r                 reload",
@@ -280,7 +281,7 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
     };
     let left = app.delivery_message.clone().unwrap_or_else(|| {
         format!(
-            "{} · {} · line {position}/{} · Q ask · [c/]c changes · [r/]r trail · ^o/^i history · b diff",
+            "{} · {} · line {position}/{} · Q ask · R guide · [c/]c changes · [r/]r trail · ^o/^i history · b diff",
             app.context_path,
             app.context_version,
             app.context_lines.len()
