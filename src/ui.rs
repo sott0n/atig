@@ -7,6 +7,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::Paragraph,
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
     AgentIntent, App, ImpactKind, InputMode, RepositorySearchKind, ReviewComment, ReviewThreadRole,
@@ -155,7 +156,7 @@ fn draw_help(frame: &mut Frame, areas: &[ratatui::layout::Rect]) {
         "Q                 ask Agent about context line",
         "V, move, Q        ask Agent about a code range",
         "*                 search the repository version",
-        "R                 build an Agent reading path",
+        "R                 open code and build Agent reading path",
         "T                 expand / collapse reading path",
         ":goto <line>       jump to a diff line",
         "/, n, N           search / next / previous",
@@ -191,26 +192,7 @@ fn draw_help(frame: &mut Frame, areas: &[ratatui::layout::Rect]) {
 fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
     let height = areas[0].height as usize;
     let mut trail_header = if let Some(point) = app.current_reading_point() {
-        let position = app.context_reading_index.unwrap_or(0) + 1;
-        vec![Line::from(vec![
-            Span::styled(" ◆ ", Style::default().fg(Color::Magenta)),
-            Span::styled(
-                format!("READ {position}/{}", app.context_reading_path.len()),
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(
-                    " · {}/{} visited · {} · {}",
-                    app.context_reading_visited.len(),
-                    app.context_reading_path.len(),
-                    reading_point_location(point),
-                    point.reason
-                ),
-                Style::default().fg(Color::White),
-            ),
-        ])]
+        reading_arrival_lines(app, point, areas[0].width as usize)
     } else if !app.context_reading_path.is_empty() {
         vec![Line::from(vec![
             Span::styled(" ◆ ", Style::default().fg(Color::Magenta)),
@@ -240,13 +222,26 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
         + (start..app.context_cursor)
             .map(|index| {
                 1 + app
-                    .understanding_threads_at_context(index + 1)
-                    .iter()
-                    .enumerate()
-                    .map(|(turn, thread)| {
-                        understanding_thread_box(thread, turn + 1, areas[0].width as usize).len()
+                    .current_reading_annotations(index + 1)
+                    .into_iter()
+                    .map(|annotation| {
+                        temporary_annotation_lines(annotation, areas[0].width as usize).len()
                     })
                     .sum::<usize>()
+                    + app
+                        .understanding_threads_at_context(index + 1)
+                        .iter()
+                        .enumerate()
+                        .map(|(turn, thread)| {
+                            understanding_thread_box(
+                                thread,
+                                turn + 1,
+                                areas[0].width as usize,
+                                app.dispatch_animation_frame,
+                            )
+                            .len()
+                        })
+                        .sum::<usize>()
             })
             .sum::<usize>();
     if rows_before_selection >= height {
@@ -265,6 +260,12 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
         } else {
             SourceSelection::None
         };
+        for annotation in app.current_reading_annotations(index + 1) {
+            lines.extend(temporary_annotation_lines(
+                annotation,
+                areas[0].width as usize,
+            ));
+        }
         lines.push(source_line(
             index + 1,
             text,
@@ -289,6 +290,7 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
                 thread,
                 turn + 1,
                 areas[0].width as usize,
+                app.dispatch_animation_frame,
             ));
         }
     }
@@ -328,7 +330,7 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
     } else {
         app.context_cursor + 1
     };
-    let left = app.delivery_message.clone().unwrap_or_else(|| {
+    let left = app.delivery_status().unwrap_or_else(|| {
         if app.context_range_start.is_some() {
             let (start, end) = app.context_selected_range();
             format!("VISUAL LINES {start}-{end} · Q ask range · V/Esc cancel")
@@ -366,6 +368,7 @@ fn understanding_thread_box(
     thread: &crate::app::UnderstandingThread,
     turn: usize,
     width: usize,
+    animation_frame: usize,
 ) -> Vec<Line<'static>> {
     let content_width = width.saturating_sub(4).max(1);
     let mut lines = vec![Line::from(vec![
@@ -404,8 +407,11 @@ fn understanding_thread_box(
                 .add_modifier(Modifier::BOLD),
         ),
     ]));
-    let answer = thread.answer.as_deref().unwrap_or("Thinking...");
-    for chunk in wrap_comment_body(answer, content_width) {
+    let answer = thread
+        .answer
+        .clone()
+        .unwrap_or_else(|| format!("Thinking{}", ".".repeat(animation_frame % 3 + 1)));
+    for chunk in wrap_comment_body(&answer, content_width) {
         lines.push(Line::from(vec![
             Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
             Span::styled(chunk, Style::default().fg(Color::White)),
@@ -435,12 +441,96 @@ fn understanding_thread_box(
     lines
 }
 
+fn temporary_annotation_lines(
+    annotation: &crate::app::AgentCodeAnnotation,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let prefix = format!("       // ↓ L{} · ", annotation.line);
+    let prefix_width = UnicodeWidthStr::width(prefix.as_str());
+    let continuation = " ".repeat(prefix_width);
+    let content_width = width.saturating_sub(prefix_width).max(1);
+    wrap_comment_body(&annotation.comment, content_width)
+        .into_iter()
+        .enumerate()
+        .map(|(index, chunk)| {
+            Line::from(vec![
+                Span::styled(
+                    if index == 0 {
+                        prefix.clone()
+                    } else {
+                        continuation.clone()
+                    },
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::styled(
+                    chunk,
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::ITALIC),
+                ),
+            ])
+        })
+        .collect()
+}
+
 fn reading_point_location(point: &crate::app::AgentReadingPoint) -> String {
     if point.symbol.is_empty() {
         format!("{}:{}", point.file, point.line)
     } else {
         format!("{} · {}:{}", point.symbol, point.file, point.line)
     }
+}
+
+fn reading_arrival_lines(
+    app: &App,
+    point: &crate::app::AgentReadingPoint,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let position = app.context_reading_index.unwrap_or(0) + 1;
+    let mut lines = vec![Line::from(vec![
+        Span::styled(" ◆ ", Style::default().fg(Color::Magenta)),
+        Span::styled(
+            format!(
+                "READING TRAIL · STEP {position}/{}",
+                app.context_reading_path.len()
+            ),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" · {}", reading_point_location(point)),
+            Style::default().fg(Color::White),
+        ),
+    ])];
+    let reason_width = width.saturating_sub(20).max(1);
+    for (index, chunk) in wrap_comment_body(&point.reason, reason_width)
+        .into_iter()
+        .enumerate()
+    {
+        lines.push(Line::from(vec![
+            Span::styled(" │ ", Style::default().fg(Color::Magenta)),
+            Span::styled(
+                if index == 0 {
+                    "WHY THIS CODE · "
+                } else {
+                    "                "
+                },
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(chunk, Style::default().fg(Color::White)),
+        ]));
+    }
+    lines.push(Line::from(vec![
+        Span::styled(" └ ", Style::default().fg(Color::Magenta)),
+        Span::styled(
+            "temporary notes point to exact lines · ]r next · [r previous · Ctrl-o back · T full trail",
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]));
+    lines
 }
 
 fn reading_trail_lines(app: &App) -> Vec<Line<'static>> {
@@ -925,7 +1015,7 @@ fn draw_comments(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) 
         draw_comment_prompt(frame, app, areas[1]);
         return;
     }
-    let status = app.delivery_message.clone().unwrap_or_else(|| {
+    let status = app.delivery_status().unwrap_or_else(|| {
         format!(
             "Review comments - {} total{} - j/k move  e edit  d delete  q back",
             app.comments.len(),
@@ -1133,8 +1223,8 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
             start.min(app.diff_scroll) + 1,
             start.max(app.diff_scroll) + 1
         )
-    } else if let Some(message) = &app.delivery_message {
-        message.clone()
+    } else if let Some(message) = app.delivery_status() {
+        message
     } else if let Some(comment_index) = app.diff_comment_selected {
         let action = if app.diff_thread_selected.is_some() {
             "Enter reply"
@@ -1325,15 +1415,23 @@ fn wrap_comment_body(body: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut wrapped = Vec::new();
     for logical_line in body.lines() {
-        let characters = logical_line.chars().collect::<Vec<_>>();
-        if characters.is_empty() {
+        if logical_line.is_empty() {
             wrapped.push(String::new());
         } else {
-            wrapped.extend(
-                characters
-                    .chunks(width)
-                    .map(|chunk| chunk.iter().collect::<String>()),
-            );
+            let mut chunk = String::new();
+            let mut chunk_width = 0;
+            for character in logical_line.chars() {
+                let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+                if !chunk.is_empty() && chunk_width + character_width > width {
+                    wrapped.push(std::mem::take(&mut chunk));
+                    chunk_width = 0;
+                }
+                chunk.push(character);
+                chunk_width += character_width;
+            }
+            if !chunk.is_empty() {
+                wrapped.push(chunk);
+            }
         }
     }
     if wrapped.is_empty() {
@@ -1746,6 +1844,7 @@ mod tests {
                 line,
                 symbol: format!("step_{line}"),
                 reason: format!("Read step {line}"),
+                annotations: Vec::new(),
             })
             .collect();
         app.context_reading_index = Some(1);
@@ -1774,9 +1873,10 @@ mod tests {
                 line: 42,
                 symbol: "Client::send".into(),
                 reason: "Shows the request boundary".into(),
+                annotations: Vec::new(),
             }],
         };
-        let text = understanding_thread_box(&thread, 1, 60)
+        let text = understanding_thread_box(&thread, 1, 60, 0)
             .iter()
             .map(Line::to_string)
             .collect::<Vec<_>>()
@@ -1787,6 +1887,82 @@ mod tests {
         assert!(text.contains("AGENT · codex:session-1"));
         assert!(text.contains("shared request boundary"));
         assert!(text.contains("READ 1 · Client::send · src/client.rs:42"));
+    }
+
+    #[test]
+    fn pending_understanding_thread_animates_thinking_dots() {
+        let thread = crate::app::UnderstandingThread {
+            source: "WORKTREE".into(),
+            version: "WORKTREE".into(),
+            file: "src/main.rs".into(),
+            line: 12,
+            end_line: None,
+            question: "Why?".into(),
+            agent: "codex:session-1".into(),
+            answer: None,
+            references: Vec::new(),
+        };
+
+        let first = understanding_thread_box(&thread, 1, 60, 0)
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let third = understanding_thread_box(&thread, 1, 60, 2)
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(first.contains("Thinking."));
+        assert!(third.contains("Thinking..."));
+    }
+
+    #[test]
+    fn reading_arrival_explains_why_the_destination_matters() {
+        let mut app = App::new();
+        app.context_reading_path = vec![crate::app::AgentReadingPoint {
+            file: "src/client.rs".into(),
+            line: 42,
+            symbol: "Client::send".into(),
+            reason: "This is the shared request boundary".into(),
+            annotations: Vec::new(),
+        }];
+        app.context_reading_index = Some(0);
+
+        let text = reading_arrival_lines(&app, &app.context_reading_path[0], 80)
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("READING TRAIL · STEP 1/1"));
+        assert!(text.contains("WHY THIS CODE"));
+        assert!(text.contains("shared request boundary"));
+        assert!(text.contains("Ctrl-o back"));
+    }
+
+    #[test]
+    fn temporary_reading_annotation_looks_like_a_code_comment() {
+        let annotation = crate::app::AgentCodeAnnotation {
+            line: 42,
+            comment: "Retries only the recoverable transport error".into(),
+        };
+
+        let text = temporary_annotation_lines(&annotation, 80)
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("// ↓ L42 ·"));
+        assert!(text.contains("Retries only the recoverable transport error"));
+        assert!(!text.contains("TEMP"));
+    }
+
+    #[test]
+    fn comment_wrapping_uses_terminal_display_width() {
+        assert_eq!(wrap_comment_body("あいうえ", 4), ["あい", "うえ"]);
     }
 
     #[test]
@@ -1893,6 +2069,7 @@ mod tests {
                 line: 8,
                 symbol: "parse".into(),
                 reason: "Follow the parsing entry point".into(),
+                annotations: Vec::new(),
             }],
         };
         let rendered = agent_intent_box(&intent, 60);

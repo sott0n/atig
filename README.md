@@ -115,6 +115,7 @@ the selected agent session.
 | `F` | Add a comment for the current file |
 | `C` | Add a comment for the whole commit |
 | `Enter` | Open the selected line in code context, edit a review, or reply to a thread |
+| `R` | Open the selected code line and build an Agent reading path |
 | `v` | Open the review comment list |
 | `t` | Open the changed-file navigator (`Δ` Agent change, `◆` Intent count, `●` review count) |
 | `i` | Show or hide Agent Intent cards |
@@ -195,10 +196,18 @@ Press `R` to ask the selected Agent to build a focused reading path without
 typing a question. The Agent explains the current location, then identifies
 up to five related definitions, callers, state, or tests in the order a human
 should read them. The result is persisted like a normal understanding answer
-and can be followed immediately with `]r` and `[r`. Press `T` to expand the
-complete Reading Trail in Context View. The list marks the current location,
-visited locations, and locations that remain unread; press `T` again to
-collapse it without losing progress.
+and can be followed immediately with `]r` and `[r`. Each destination keeps a
+prominent `WHY THIS CODE` explanation above the source, together with its step
+number and controls for continuing or returning. Important source lines also
+receive cyan `// ↓ L42` explanations immediately before the exact line they
+describe, similar to comments in an annotated example. The marker points down
+to the associated source line. These notes are a temporary reading overlay: atig
+does not edit the source file or persist the notes after exit. Press `T` to
+expand the complete Reading Trail in Context View. The list marks the current
+location, visited locations, and locations that remain unread; press `T` again
+to collapse it without losing progress. While an Agent request is running,
+the footer and inline `Thinking` indicator animate so an idle-looking screen
+does not hide ongoing work.
 
 Context navigation keeps a Vim-style location history. After following a
 Reading Trail or answer reference, press `Ctrl-o` to return to the previous

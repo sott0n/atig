@@ -4,7 +4,10 @@ mod git;
 mod review_store;
 mod ui;
 
-use std::{io, time::Duration};
+use std::{
+    io,
+    time::{Duration, Instant},
+};
 
 use anyhow::Result;
 use app::{App, DiffTarget, InputMode, RepositorySearchKind, View};
@@ -29,6 +32,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     app.enable_review_store();
     app.reload();
     let mut needs_draw = true;
+    let mut last_animation = Instant::now();
 
     while !app.should_quit {
         needs_draw |= app.drain_history_events();
@@ -36,6 +40,11 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
         needs_draw |= app.drain_dispatch_events();
         needs_draw |= app.drain_session_events();
         needs_draw |= app.drain_repository_search_events();
+        if app.dispatching && last_animation.elapsed() >= Duration::from_millis(250) {
+            app.advance_dispatch_animation();
+            last_animation = Instant::now();
+            needs_draw = true;
+        }
         if needs_draw {
             terminal.draw(|frame| ui::draw(frame, &app))?;
             needs_draw = false;
@@ -263,7 +272,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 }
                 (KeyCode::Char('m'), KeyModifiers::NONE) => app.toggle_context_bookmark(),
                 (KeyCode::Char('Q'), KeyModifiers::SHIFT) => app.start_understanding_question(),
-                (KeyCode::Char('R'), KeyModifiers::SHIFT) => app.request_guided_reading(),
+                (KeyCode::Char('R'), _) => app.request_guided_reading(),
                 (KeyCode::Char('T'), KeyModifiers::SHIFT) => app.toggle_context_reading_trail(),
                 (KeyCode::Char('V'), KeyModifiers::SHIFT) => app.toggle_context_range(),
                 (KeyCode::Char('s'), KeyModifiers::NONE) => app.open_sessions(),
@@ -367,6 +376,12 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 (KeyCode::Char(':'), KeyModifiers::NONE) => app.start_command(),
                 (KeyCode::Char('S'), _) => app.request_send_review(),
                 (KeyCode::Char('X'), KeyModifiers::SHIFT) => app.view_agent_changes(),
+                (KeyCode::Char('R'), _) => {
+                    app.open_context();
+                    if app.view == View::Context {
+                        app.request_guided_reading();
+                    }
+                }
                 (KeyCode::Char('s'), KeyModifiers::NONE) => app.open_sessions(),
                 (KeyCode::Char('/'), KeyModifiers::NONE) => app.start_search(),
                 (KeyCode::Char('n'), KeyModifiers::NONE) => app.repeat_search(1),

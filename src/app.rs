@@ -13,7 +13,7 @@ const MAX_EVENTS_PER_TICK: usize = 256;
 const MAX_UNDERSTANDING_HISTORY: usize = 6;
 const MAX_UNDERSTANDING_MESSAGE_CHARS: usize = 4_000;
 const MAX_CONTEXT_RANGE_LINES: usize = 80;
-const GUIDED_READING_QUESTION: &str = "Build a concise guided reading path for understanding how this code participates in the selected change. Explain this location first, then identify the most important related definitions, callers, state, and tests in the order a human should read them. Keep the path focused.";
+const GUIDED_READING_QUESTION: &str = "Build a concise guided reading path for understanding how this code participates in the selected change. Explain this location first, then identify the most important related definitions, callers, state, and tests in the order a human should read them. For every reading step, inspect the destination code and annotate two to eight specific important lines with what each line does and why it matters. Keep the path focused.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
@@ -92,6 +92,14 @@ pub struct AgentReadingPoint {
     #[serde(default)]
     pub symbol: String,
     pub reason: String,
+    #[serde(default, skip_serializing)]
+    pub annotations: Vec<AgentCodeAnnotation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AgentCodeAnnotation {
+    pub line: usize,
+    pub comment: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -202,6 +210,7 @@ pub struct UnderstandingThread {
 enum DispatchPurpose {
     Review,
     Understanding(usize),
+    ReadingAnnotations(usize),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -276,6 +285,7 @@ pub struct App {
     pub file_selected: usize,
     pub agent_target: Option<AgentTarget>,
     pub dispatching: bool,
+    pub dispatch_animation_frame: usize,
     pub delivery_message: Option<String>,
     pub search_input: String,
     pub search_query: String,
@@ -361,6 +371,7 @@ impl App {
             file_selected: 0,
             agent_target: None,
             dispatching: false,
+            dispatch_animation_frame: 0,
             delivery_message: None,
             search_input: String::new(),
             search_query: String::new(),
@@ -1869,6 +1880,15 @@ impl App {
             .and_then(|index| self.context_reading_path.get(index))
     }
 
+    pub fn current_reading_annotations(&self, line: usize) -> Vec<&AgentCodeAnnotation> {
+        self.current_reading_point()
+            .filter(|point| point.file == self.context_path)
+            .into_iter()
+            .flat_map(|point| &point.annotations)
+            .filter(|annotation| annotation.line == line)
+            .collect()
+    }
+
     pub fn toggle_context_reading_trail(&mut self) {
         if self.context_reading_path.is_empty() {
             self.message = "No reading trail for this change".into();
@@ -1977,8 +1997,86 @@ impl App {
         self.delivery_message = Some(format!("{progress} {}...", target.short_label()));
         self.dispatch_cancel = Some(agent::dispatch(target, prompt, tx));
         self.dispatch_rx = Some(rx);
+        self.dispatch_animation_frame = 0;
         self.dispatching = true;
         self.context_range_start = None;
+    }
+
+    fn dispatch_reading_annotations(
+        &mut self,
+        thread_index: usize,
+        references: &[AgentReadingPoint],
+        target: AgentTarget,
+    ) {
+        let excerpts = self.reading_annotation_excerpts(references);
+        let prompt = format_reading_annotation_request(references, &excerpts);
+        let (tx, rx) = mpsc::channel();
+        self.dispatch_snapshot = git::change_snapshot().ok();
+        self.dispatch_purpose = Some(DispatchPurpose::ReadingAnnotations(thread_index));
+        self.dispatched_agent = Some(target.response_label());
+        self.delivery_message = Some(format!(
+            "Adding line-by-line explanations with {}...",
+            target.short_label()
+        ));
+        self.dispatch_cancel = Some(agent::dispatch(target, prompt, tx));
+        self.dispatch_rx = Some(rx);
+        self.dispatch_animation_frame = 0;
+        self.dispatching = true;
+    }
+
+    fn reading_annotation_excerpts(&self, references: &[AgentReadingPoint]) -> Vec<String> {
+        references
+            .iter()
+            .filter_map(|point| {
+                let lines = self.reading_point_source(point)?;
+                let start = point.line.saturating_sub(10).max(1);
+                let end = point.line.saturating_add(10).min(lines.len());
+                let mut excerpt =
+                    format!("Reviewed snapshot {} lines {start}-{end}:\n", point.file);
+                for (index, text) in lines.iter().enumerate().take(end).skip(start - 1) {
+                    excerpt.push_str(&format!("{:>6} {}\n", index + 1, text));
+                }
+                Some(excerpt)
+            })
+            .collect()
+    }
+
+    fn reading_point_source(&self, point: &AgentReadingPoint) -> Option<Vec<String>> {
+        let source = self.diff_source.as_ref()?;
+        git::read_source_file(source, &point.file, git::DiffSide::New)
+            .or_else(|_| git::read_source_file(source, &point.file, git::DiffSide::Old))
+            .ok()
+            .map(|file| file.lines)
+    }
+
+    fn validate_reading_annotations(&self, references: &mut [AgentReadingPoint]) {
+        for point in references {
+            let Some(lines) = self.reading_point_source(point) else {
+                point.annotations.clear();
+                continue;
+            };
+            point.annotations.retain(|annotation| {
+                lines
+                    .get(annotation.line.saturating_sub(1))
+                    .is_some_and(|line| is_meaningful_annotation_target(line))
+            });
+        }
+    }
+
+    fn ensure_reading_annotations(&self, references: &mut [AgentReadingPoint]) {
+        for point in references {
+            if !point.annotations.is_empty() {
+                continue;
+            }
+            let line = self
+                .reading_point_source(point)
+                .and_then(|lines| nearest_meaningful_line(&lines, point.line))
+                .unwrap_or(point.line);
+            point.annotations.push(AgentCodeAnnotation {
+                line,
+                comment: point.reason.clone(),
+            });
+        }
     }
 
     pub fn understanding_threads_at_context(&self, line: usize) -> Vec<&UnderstandingThread> {
@@ -2090,7 +2188,29 @@ impl App {
     }
 
     pub fn dismiss_delivery_message(&mut self) {
-        self.delivery_message = None;
+        if !self.dispatching {
+            self.delivery_message = None;
+        }
+    }
+
+    pub fn advance_dispatch_animation(&mut self) {
+        if self.dispatching {
+            self.dispatch_animation_frame = (self.dispatch_animation_frame + 1) % 3;
+        }
+    }
+
+    pub fn delivery_status(&self) -> Option<String> {
+        self.delivery_message.as_ref().map(|message| {
+            if self.dispatching {
+                format!(
+                    "{}{}",
+                    message.trim_end_matches('.'),
+                    ".".repeat(self.dispatch_animation_frame + 1)
+                )
+            } else {
+                message.clone()
+            }
+        })
     }
 
     pub fn cancel_send_review(&mut self) {
@@ -2120,6 +2240,7 @@ impl App {
         self.dispatched_comments = comments;
         self.pending_send_comment_index = None;
         self.dispatch_rx = Some(rx);
+        self.dispatch_animation_frame = 0;
         self.dispatching = true;
         self.input_mode = InputMode::Normal;
         self.message = "Review queued for delivery".into();
@@ -2146,6 +2267,54 @@ impl App {
                     .dispatch_purpose
                     .take()
                     .unwrap_or(DispatchPurpose::Review);
+                if let DispatchPurpose::ReadingAnnotations(index) = purpose {
+                    let (_, mut enriched) = parse_understanding_response(&response);
+                    self.validate_reading_annotations(&mut enriched);
+                    let mut references = self
+                        .understanding_threads
+                        .get(index)
+                        .map(|thread| thread.references.clone())
+                        .unwrap_or_default();
+                    merge_reading_annotations(&mut references, &enriched);
+                    self.ensure_reading_annotations(&mut references);
+                    let active_context =
+                        self.understanding_threads.get(index).is_some_and(|thread| {
+                            thread.source
+                                == self
+                                    .diff_source
+                                    .as_ref()
+                                    .map(git::DiffSource::id)
+                                    .unwrap_or_default()
+                                && thread.version == self.context_version
+                        });
+                    if let Some(thread) = self.understanding_threads.get_mut(index) {
+                        thread.references = references.clone();
+                    }
+                    if active_context && !references.is_empty() {
+                        self.context_reading_path = references;
+                        self.show_context_reading_trail = true;
+                    }
+                    let changed = self
+                        .dispatch_snapshot
+                        .take()
+                        .and_then(|before| git::change_snapshot().ok().map(|after| (before, after)))
+                        .map(|(before, after)| changed_paths(&before, &after))
+                        .unwrap_or_default();
+                    self.dispatched_agent = None;
+                    self.dispatched_comments.clear();
+                    self.message = if changed.is_empty() {
+                        "Line-by-line explanations ready".into()
+                    } else {
+                        format!(
+                            "Safety warning: line explanation request changed {} file(s): {}",
+                            changed.len(),
+                            changed.join(", ")
+                        )
+                    };
+                    self.delivery_message = Some(self.message.clone());
+                    self.persist_reviews();
+                    return true;
+                }
                 if let DispatchPurpose::Understanding(index) = purpose {
                     let changed = self
                         .dispatch_snapshot
@@ -2161,7 +2330,8 @@ impl App {
                             changed.join(", ")
                         ));
                     }
-                    let (answer, references) = parse_understanding_response(&response);
+                    let (answer, mut references) = parse_understanding_response(&response);
+                    self.validate_reading_annotations(&mut references);
                     let reference_count = references.len();
                     let mut active_context = false;
                     let mut guided_reading = false;
@@ -2181,10 +2351,19 @@ impl App {
                         thread.references = references.clone();
                     }
                     if active_context && !references.is_empty() {
-                        self.context_reading_path = references;
+                        self.context_reading_path = references.clone();
                         self.context_reading_index = None;
                         self.context_reading_visited.clear();
                         self.show_context_reading_trail = true;
+                    }
+                    if guided_reading
+                        && references.iter().any(|point| point.annotations.is_empty())
+                        && let Some(target) = self.agent_target.clone()
+                    {
+                        self.message = "Reading path received · adding line explanations".into();
+                        self.persist_reviews();
+                        self.dispatch_reading_annotations(index, &references, target);
+                        return true;
                     }
                     self.dispatched_agent = None;
                     self.dispatched_comments.clear();
@@ -2281,7 +2460,39 @@ impl App {
                 self.dispatched_comments.clear();
                 self.dispatched_agent = None;
                 self.dispatch_snapshot = None;
-                if let Some(DispatchPurpose::Understanding(index)) = self.dispatch_purpose.take()
+                let purpose = self.dispatch_purpose.take();
+                if let Some(DispatchPurpose::ReadingAnnotations(index)) = purpose {
+                    let mut references = self
+                        .understanding_threads
+                        .get(index)
+                        .map(|thread| thread.references.clone())
+                        .unwrap_or_default();
+                    self.ensure_reading_annotations(&mut references);
+                    let active_context =
+                        self.understanding_threads.get(index).is_some_and(|thread| {
+                            thread.source
+                                == self
+                                    .diff_source
+                                    .as_ref()
+                                    .map(git::DiffSource::id)
+                                    .unwrap_or_default()
+                                && thread.version == self.context_version
+                        });
+                    if let Some(thread) = self.understanding_threads.get_mut(index) {
+                        thread.references = references.clone();
+                    }
+                    if active_context && !references.is_empty() {
+                        self.context_reading_path = references;
+                        self.show_context_reading_trail = true;
+                    }
+                    self.message = format!(
+                        "Detailed line explanations failed; showing fallback notes: {error}"
+                    );
+                    self.delivery_message = Some(self.message.clone());
+                    self.persist_reviews();
+                    return true;
+                }
+                if let Some(DispatchPurpose::Understanding(index)) = purpose
                     && let Some(thread) = self.understanding_threads.get_mut(index)
                 {
                     thread.answer = Some(format!("Request failed: {error}"));
@@ -3046,6 +3257,9 @@ fn parse_agent_intents(body: &str) -> Vec<AgentIntent> {
         intent
             .reading_path
             .retain(|point| point.line > 0 && git::is_safe_repository_path(&point.file));
+        for point in &mut intent.reading_path {
+            sanitize_code_annotations(point);
+        }
         intent.reading_path.truncate(5);
     }
     intents
@@ -3061,6 +3275,9 @@ fn parse_understanding_response(body: &str) -> (String, Vec<AgentReadingPoint>) 
     let mut references: Vec<AgentReadingPoint> =
         serde_json::from_str(manifest.trim()).unwrap_or_default();
     references.retain(|point| point.line > 0 && git::is_safe_repository_path(&point.file));
+    for point in &mut references {
+        sanitize_code_annotations(point);
+    }
     references.truncate(5);
     let visible = [before.trim(), after.trim()]
         .into_iter()
@@ -3068,6 +3285,60 @@ fn parse_understanding_response(body: &str) -> (String, Vec<AgentReadingPoint>) 
         .collect::<Vec<_>>()
         .join("\n\n");
     (visible, references)
+}
+
+fn sanitize_code_annotations(point: &mut AgentReadingPoint) {
+    point
+        .annotations
+        .retain(|annotation| annotation.line > 0 && !annotation.comment.trim().is_empty());
+    point.annotations.truncate(8);
+    for annotation in &mut point.annotations {
+        annotation.comment = annotation.comment.trim().chars().take(300).collect();
+    }
+}
+
+fn merge_reading_annotations(references: &mut [AgentReadingPoint], enriched: &[AgentReadingPoint]) {
+    for point in references {
+        if let Some(candidate) = enriched.iter().find(|candidate| {
+            candidate.file == point.file
+                && candidate.line == point.line
+                && !candidate.annotations.is_empty()
+        }) {
+            point.annotations = candidate.annotations.clone();
+        }
+    }
+}
+
+fn is_meaningful_annotation_target(line: &str) -> bool {
+    let trimmed = line.trim();
+    !trimmed.is_empty()
+        && trimmed
+            .chars()
+            .any(|character| character == '_' || character.is_alphanumeric())
+}
+
+fn nearest_meaningful_line(lines: &[String], requested: usize) -> Option<usize> {
+    if lines.is_empty() {
+        return None;
+    }
+    let requested = requested.clamp(1, lines.len());
+    if is_meaningful_annotation_target(&lines[requested - 1]) {
+        return Some(requested);
+    }
+    for distance in 1..=10 {
+        for candidate in [
+            requested.checked_sub(distance),
+            requested.checked_add(distance),
+        ] {
+            let Some(line) = candidate.filter(|line| (1..=lines.len()).contains(line)) else {
+                continue;
+            };
+            if is_meaningful_annotation_target(&lines[line - 1]) {
+                return Some(line);
+            }
+        }
+    }
+    None
 }
 
 fn scope_diff_index(diff: &[String], scope: &ReviewScope) -> Option<usize> {
@@ -3125,7 +3396,7 @@ fn parse_hunk_start(line: &str) -> Option<(usize, usize)> {
 
 fn format_review_request(comments: &[ReviewComment]) -> String {
     let mut prompt = String::from(
-        "Please address the following code review comments. Use a sub-agent for the implementation when your environment supports it. Inspect the current working tree before editing, make only the requested changes, and run relevant tests. Do not commit or push.\n\nAfter your normal response, append a change-intent manifest in exactly this form, without a Markdown code fence:\n<atig-intents>\n[{\"file\":\"relative/path.rs\",\"line\":123,\"side\":\"new\",\"intent\":\"Why this logical change was made\",\"reading_path\":[{\"file\":\"relative/related.rs\",\"line\":45,\"symbol\":\"Related::method\",\"reason\":\"Why this code helps explain the change\"}]}]\n</atig-intents>\nUse repository-relative paths. Add one concise entry per logical change, anchored to its first added or modified post-change line with side \"new\". For a pure deletion, use the first deleted pre-change line with side \"old\". For each intent, add up to five post-change reading_path locations in the order a human should read them to understand the change. Include only useful locations, use an empty symbol when unavailable, and use [] when no additional code is needed. Use [] for the entire manifest when you made no code changes.\n\n",
+        "Please address the following code review comments. Use a sub-agent for the implementation when your environment supports it. Inspect the current working tree before editing, make only the requested changes, and run relevant tests. Do not commit or push.\n\nAfter your normal response, append a change-intent manifest in exactly this form, without a Markdown code fence:\n<atig-intents>\n[{\"file\":\"relative/path.rs\",\"line\":123,\"side\":\"new\",\"intent\":\"Why this logical change was made\",\"reading_path\":[{\"file\":\"relative/related.rs\",\"line\":45,\"symbol\":\"Related::method\",\"reason\":\"Why this code helps explain the change\",\"annotations\":[{\"line\":45,\"comment\":\"What this line does and why it matters\"}]}]}]\n</atig-intents>\nUse repository-relative paths. Add one concise entry per logical change, anchored to its first added or modified post-change line with side \"new\". For a pure deletion, use the first deleted pre-change line with side \"old\". For each intent, add up to five post-change reading_path locations in the order a human should read them to understand the change. Add two to eight concise line annotations per reading location so a human can follow the important code line by line. Annotation line numbers must belong to the same file. Include only useful locations, use an empty symbol when unavailable, and use [] when no additional code is needed. Use [] for the entire manifest when you made no code changes.\n\n",
     );
     for (index, comment) in comments.iter().enumerate() {
         prompt.push_str(&format!(
@@ -3171,7 +3442,7 @@ fn format_understanding_request(
         format!("{file}:{line}-{end_line}")
     };
     let mut prompt = format!(
-        "Help a human understand the existing code at {location}. Answer the question using read-only inspection only. Do not edit, create, delete, or format files; do not commit or push. Explain the behavior and rationale from the code, cite repository-relative file:line locations for important claims, and say when something cannot be determined from the code. After your normal answer, append up to five important code references in exactly this form, without a Markdown code fence:\n<atig-references>\n[{{\"file\":\"relative/path.rs\",\"line\":123,\"symbol\":\"Type::method\",\"reason\":\"Why this location supports the explanation\"}}]\n</atig-references>\nUse repository-relative post-change locations, an empty symbol when unavailable, and [] when no extra code should be read.\n"
+        "Help a human understand the existing code at {location}. Answer the question using read-only inspection only. Do not edit, create, delete, or format files; do not commit or push. Explain the behavior and rationale from the code, cite repository-relative file:line locations for important claims, and say when something cannot be determined from the code. After your normal answer, append up to five important code references in exactly this form, without a Markdown code fence:\n<atig-references>\n[{{\"file\":\"relative/path.rs\",\"line\":123,\"symbol\":\"Type::method\",\"reason\":\"Why this location supports the explanation\",\"annotations\":[{{\"line\":123,\"comment\":\"What this line does and why it matters\"}}]}}]\n</atig-references>\nFor every reference, include two to eight concise annotations on the important code lines a human should notice. Annotation line numbers must belong to the same file. Use repository-relative post-change locations, an empty symbol when unavailable, and [] when no extra code should be read.\n"
     );
     let answered = previous
         .iter()
@@ -3198,6 +3469,26 @@ fn format_understanding_request(
     }
     prompt.push_str("```\n");
     prompt
+}
+
+fn format_reading_annotation_request(
+    references: &[AgentReadingPoint],
+    excerpts: &[String],
+) -> String {
+    let locations = references
+        .iter()
+        .map(|point| {
+            format!(
+                "- {}:{} {} — {}",
+                point.file, point.line, point.symbol, point.reason
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let snapshots = excerpts.join("\n");
+    format!(
+        "Add line-by-line explanations to this existing guided reading path:\n{locations}\n\nUse only the numbered reviewed-snapshot excerpts below as the source for annotations. Do not inspect the current worktree to choose annotation line numbers, because it may differ from the reviewed Git snapshot. Use read-only operations only. Do not edit, create, delete, or format files; do not commit or push. Return the same locations in the same order. For every location, annotate two to eight specific important code lines so a human can understand the control flow, state changes, inputs, outputs, and connection to the reviewed change. Attach each explanation to the exact executable statement or declaration it describes. Never annotate a blank, brace-only, or delimiter-only line. After a brief response, append exactly this manifest without a Markdown code fence:\n<atig-references>\n[{{\"file\":\"relative/path.rs\",\"line\":123,\"symbol\":\"Type::method\",\"reason\":\"Why this location matters\",\"annotations\":[{{\"line\":123,\"comment\":\"What this exact line does and why it matters\"}}]}}]\n</atig-references>\nAnnotation line numbers must exactly match a numbered line in the corresponding reviewed-snapshot excerpt. Do not omit annotations.\n\n{snapshots}"
+    )
 }
 
 fn truncate_for_prompt(value: &str) -> String {
@@ -3970,6 +4261,7 @@ mod tests {
                     line: 1,
                     symbol: "package".into(),
                     reason: "Understand the crate context".into(),
+                    annotations: Vec::new(),
                 }],
             }])
         );
@@ -4074,6 +4366,21 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_status_animates_and_is_not_dismissed_while_running() {
+        let mut app = App::new();
+        app.dispatching = true;
+        app.delivery_message = Some("Thinking...".into());
+
+        assert_eq!(app.delivery_status().as_deref(), Some("Thinking."));
+        app.advance_dispatch_animation();
+        assert_eq!(app.delivery_status().as_deref(), Some("Thinking.."));
+        app.dismiss_delivery_message();
+        assert_eq!(app.delivery_status().as_deref(), Some("Thinking.."));
+        app.advance_dispatch_animation();
+        assert_eq!(app.delivery_status().as_deref(), Some("Thinking..."));
+    }
+
+    #[test]
     fn understanding_response_is_attached_to_its_source_line() {
         let mut app = App::new();
         app.understanding_threads.push(UnderstandingThread {
@@ -4113,6 +4420,7 @@ mod tests {
                 line: 1,
                 symbol: "package".into(),
                 reason: "Shows the crate context".into(),
+                annotations: Vec::new(),
             }]
         );
         assert_eq!(app.message, "Agent explanation received");
@@ -4174,6 +4482,8 @@ mod tests {
 
         assert!(prompt.contains("in the order a human should read them"));
         assert!(prompt.contains("up to five important code references"));
+        assert!(prompt.contains("two to eight concise annotations"));
+        assert!(prompt.contains("\"annotations\""));
         assert!(prompt.contains("Do not edit, create, delete, or format files"));
     }
 
@@ -4223,14 +4533,80 @@ mod tests {
 
     #[test]
     fn understanding_reference_manifest_is_hidden_and_safely_filtered() {
-        let response = "Explanation.\n<atig-references>\n[{\"file\":\"../secret\",\"line\":1,\"reason\":\"unsafe\"},{\"file\":\"src/main.rs\",\"line\":12,\"reason\":\"entry point\"}]\n</atig-references>\nSafety warning: changed file.";
+        let response = "Explanation.\n<atig-references>\n[{\"file\":\"../secret\",\"line\":1,\"reason\":\"unsafe\"},{\"file\":\"src/main.rs\",\"line\":12,\"reason\":\"entry point\",\"annotations\":[{\"line\":12,\"comment\":\"  Parses the request  \"},{\"line\":0,\"comment\":\"invalid\"}]}]\n</atig-references>\nSafety warning: changed file.";
 
         let (answer, references) = parse_understanding_response(response);
 
         assert_eq!(answer, "Explanation.\n\nSafety warning: changed file.");
         assert_eq!(references.len(), 1);
         assert_eq!(references[0].file, "src/main.rs");
+        assert_eq!(
+            references[0].annotations,
+            [AgentCodeAnnotation {
+                line: 12,
+                comment: "Parses the request".into(),
+            }]
+        );
+        assert!(
+            !serde_json::to_string(&references[0])
+                .unwrap()
+                .contains("annotations")
+        );
         assert!(!answer.contains("atig-references"));
+    }
+
+    #[test]
+    fn reading_annotation_enrichment_merges_details() {
+        let mut references = vec![
+            AgentReadingPoint {
+                file: "src/a.rs".into(),
+                line: 10,
+                symbol: "a".into(),
+                reason: "Understand A".into(),
+                annotations: Vec::new(),
+            },
+            AgentReadingPoint {
+                file: "src/b.rs".into(),
+                line: 20,
+                symbol: "b".into(),
+                reason: "Understand B".into(),
+                annotations: Vec::new(),
+            },
+        ];
+        let enriched = vec![AgentReadingPoint {
+            file: "src/a.rs".into(),
+            line: 10,
+            symbol: "a".into(),
+            reason: "Understand A".into(),
+            annotations: vec![AgentCodeAnnotation {
+                line: 11,
+                comment: "Updates shared state".into(),
+            }],
+        }];
+
+        merge_reading_annotations(&mut references, &enriched);
+
+        assert_eq!(references[0].annotations, enriched[0].annotations);
+        assert!(references[1].annotations.is_empty());
+        let excerpts = vec!["Reviewed snapshot src/a.rs lines 9-11:\n     10 fn a()".into()];
+        let prompt = format_reading_annotation_request(&references, &excerpts);
+        assert!(prompt.contains("Do not omit annotations"));
+        assert!(prompt.contains("src/a.rs:10"));
+        assert!(prompt.contains("Reviewed snapshot src/a.rs"));
+        assert!(prompt.contains("Never annotate a blank, brace-only, or delimiter-only line"));
+    }
+
+    #[test]
+    fn nearest_annotation_target_skips_brace_only_lines() {
+        let lines = vec![
+            "fn example() {".into(),
+            "    update_state();".into(),
+            "}".into(),
+        ];
+
+        assert_eq!(nearest_meaningful_line(&lines, 3), Some(2));
+        assert!(!is_meaningful_annotation_target("    }"));
+        assert!(!is_meaningful_annotation_target("    ),"));
     }
 
     #[test]
