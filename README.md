@@ -15,7 +15,9 @@ Claude session.
 - Streaming `git log` output, bounded event batches, and cancellation of stale
   loads to stay responsive in repositories with long histories.
 - Vim-style movement, search, and command input.
-- Colorized commit diffs with direct file, hunk, page, and line-number jumps.
+- Syntax-highlighted commit diffs with direct file, hunk, page, and line-number
+  jumps. Language detection covers Rust, JavaScript/TypeScript, Python, Go,
+  C-family languages, Ruby, shell, common data formats, SQL, and web files.
 - Diff-line review comments with a list for editing and deletion.
 - Repository-scoped Codex and Claude session discovery with an in-TUI picker.
 - Explicitly confirmed, batched delivery to an existing Codex or Claude

@@ -1122,15 +1122,18 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
 
     let mut lines = Vec::with_capacity(height);
     let mut comment_input_row = None;
+    let mut syntax = syntax_at_diff_line(&app.diff, start);
     for (index, line) in app.diff.iter().enumerate().skip(start) {
         if lines.len() >= height {
             break;
         }
+        update_diff_syntax(line, &mut syntax);
         lines.push(diff_line(
             line,
             (app.diff_scroll == index && app.diff_comment_selected.is_none())
                 || app.range_contains(index),
             areas[0].width as usize,
+            syntax,
         ));
         if commenting && app.diff_scroll == index && app.followup_comment_index().is_none() {
             comment_input_row = Some(lines.len() + 1);
@@ -1514,10 +1517,82 @@ fn diff_viewport_start(app: &App, height: usize) -> usize {
         .min(app.diff.len().saturating_sub(height))
 }
 
-fn diff_line(line: &str, selected: bool, viewport_width: usize) -> Line<'static> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SyntaxLanguage {
+    Rust,
+    JavaScript,
+    Python,
+    Go,
+    CLike,
+    Ruby,
+    Shell,
+    Data,
+    Sql,
+    Web,
+}
+
+fn syntax_at_diff_line(diff: &[String], end: usize) -> Option<SyntaxLanguage> {
+    for line in diff.iter().take(end).rev() {
+        if let Some(path) = line
+            .strip_prefix("+++ b/")
+            .or_else(|| line.strip_prefix("--- a/"))
+        {
+            return language_for_path(path);
+        }
+        if line.starts_with("diff --git ") {
+            break;
+        }
+    }
+    None
+}
+
+fn update_diff_syntax(line: &str, syntax: &mut Option<SyntaxLanguage>) {
+    if line.starts_with("diff --git ") {
+        *syntax = None;
+    }
+    if let Some(path) = line
+        .strip_prefix("--- a/")
+        .or_else(|| line.strip_prefix("+++ b/"))
+    {
+        *syntax = language_for_path(path);
+    }
+}
+
+fn language_for_path(path: &str) -> Option<SyntaxLanguage> {
+    let path = path.trim_matches('"');
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let extension = name.rsplit_once('.').map(|(_, extension)| extension)?;
+    match extension.to_ascii_lowercase().as_str() {
+        "rs" => Some(SyntaxLanguage::Rust),
+        "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" => Some(SyntaxLanguage::JavaScript),
+        "py" | "pyi" => Some(SyntaxLanguage::Python),
+        "go" => Some(SyntaxLanguage::Go),
+        "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" | "java" | "kt" | "kts" | "cs" | "swift" => {
+            Some(SyntaxLanguage::CLike)
+        }
+        "rb" => Some(SyntaxLanguage::Ruby),
+        "sh" | "bash" | "zsh" | "fish" => Some(SyntaxLanguage::Shell),
+        "json" | "jsonc" | "yaml" | "yml" | "toml" => Some(SyntaxLanguage::Data),
+        "sql" => Some(SyntaxLanguage::Sql),
+        "html" | "htm" | "css" | "scss" | "sass" | "vue" | "svelte" => Some(SyntaxLanguage::Web),
+        _ => None,
+    }
+}
+
+fn diff_line(
+    line: &str,
+    selected: bool,
+    viewport_width: usize,
+    syntax: Option<SyntaxLanguage>,
+) -> Line<'static> {
+    let style = diff_line_style(line);
+    let mut rendered = if is_diff_code_line(line) {
+        highlighted_code_line(line, syntax, style, selected)
+    } else {
+        Line::styled(line.to_string(), style)
+    };
     if selected {
-        let mut rendered = Line::styled(
-            line.to_string(),
+        rendered = rendered.style(
             Style::default()
                 .fg(Color::White)
                 .bg(Color::Green)
@@ -1526,10 +1601,12 @@ fn diff_line(line: &str, selected: bool, viewport_width: usize) -> Line<'static>
         rendered.push_span(Span::raw(
             " ".repeat(viewport_width.saturating_sub(rendered.width())),
         ));
-        return rendered;
     }
+    rendered
+}
 
-    let style = if line.starts_with("diff --git ") {
+fn diff_line_style(line: &str) -> Style {
+    if line.starts_with("diff --git ") {
         Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD)
@@ -1555,8 +1632,393 @@ fn diff_line(line: &str, selected: bool, viewport_width: usize) -> Line<'static>
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
+    }
+}
+
+fn is_diff_code_line(line: &str) -> bool {
+    (line.starts_with('+') && !line.starts_with("+++"))
+        || (line.starts_with('-') && !line.starts_with("---"))
+        || line.starts_with(' ')
+}
+
+fn highlighted_code_line(
+    line: &str,
+    language: Option<SyntaxLanguage>,
+    base: Style,
+    selected: bool,
+) -> Line<'static> {
+    let mut characters = line.char_indices();
+    let Some((_, marker)) = characters.next() else {
+        return Line::default();
     };
-    Line::styled(line.to_string(), style)
+    let code_start = marker.len_utf8();
+    let code_base = if selected {
+        Style::default().fg(Color::White)
+    } else {
+        base
+    };
+    let mut spans = vec![Span::styled(marker.to_string(), code_base)];
+    spans.extend(highlight_code(&line[code_start..], language, code_base));
+    Line::from(spans)
+}
+
+fn highlight_code(code: &str, language: Option<SyntaxLanguage>, base: Style) -> Vec<Span<'static>> {
+    let Some(language) = language else {
+        return vec![Span::styled(code.to_string(), base)];
+    };
+    let mut spans = Vec::new();
+    let mut cursor = 0;
+    while cursor < code.len() {
+        let rest = &code[cursor..];
+        if starts_line_comment(rest, language) {
+            spans.push(Span::styled(
+                rest.to_string(),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            ));
+            break;
+        }
+        if rest.starts_with("/*") || rest.starts_with("<!--") {
+            let closing = if rest.starts_with("<!--") {
+                "-->"
+            } else {
+                "*/"
+            };
+            let length = rest
+                .find(closing)
+                .map(|index| index + closing.len())
+                .unwrap_or(rest.len());
+            spans.push(Span::styled(
+                rest[..length].to_string(),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            ));
+            cursor += length;
+            continue;
+        }
+        let character = rest.chars().next().expect("non-empty code remainder");
+        if matches!(character, '"' | '\'' | '`') {
+            let length = quoted_token_len(rest, character);
+            spans.push(Span::styled(
+                rest[..length].to_string(),
+                Style::default().fg(Color::Yellow),
+            ));
+            cursor += length;
+            continue;
+        }
+        if character.is_ascii_digit() {
+            let length = rest
+                .char_indices()
+                .take_while(|(_, value)| {
+                    value.is_ascii_alphanumeric() || matches!(value, '.' | '_')
+                })
+                .map(|(index, value)| index + value.len_utf8())
+                .last()
+                .unwrap_or(character.len_utf8());
+            spans.push(Span::styled(
+                rest[..length].to_string(),
+                Style::default().fg(Color::Cyan),
+            ));
+            cursor += length;
+            continue;
+        }
+        if is_identifier_start(character) {
+            let length = rest
+                .char_indices()
+                .take_while(|(_, value)| is_identifier_continue(*value))
+                .map(|(index, value)| index + value.len_utf8())
+                .last()
+                .unwrap_or(character.len_utf8());
+            let token = &rest[..length];
+            let following = rest[length..].trim_start();
+            let style = if is_keyword(token, language) {
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD)
+            } else if is_builtin_type(token, language)
+                || token.chars().next().is_some_and(char::is_uppercase)
+            {
+                Style::default().fg(Color::LightBlue)
+            } else if following.starts_with('(') {
+                Style::default().fg(Color::Cyan)
+            } else {
+                base
+            };
+            spans.push(Span::styled(token.to_string(), style));
+            cursor += length;
+            continue;
+        }
+        let length = character.len_utf8();
+        spans.push(Span::styled(rest[..length].to_string(), base));
+        cursor += length;
+    }
+    spans
+}
+
+fn starts_line_comment(text: &str, language: SyntaxLanguage) -> bool {
+    text.starts_with("//")
+        || matches!(
+            language,
+            SyntaxLanguage::Python | SyntaxLanguage::Ruby | SyntaxLanguage::Shell
+        ) && text.starts_with('#')
+        || language == SyntaxLanguage::Data && text.starts_with('#')
+        || language == SyntaxLanguage::Sql && text.starts_with("--")
+}
+
+fn quoted_token_len(text: &str, quote: char) -> usize {
+    let mut escaped = false;
+    for (index, character) in text.char_indices().skip(1) {
+        if character == quote && !escaped {
+            return index + character.len_utf8();
+        }
+        escaped = character == '\\' && !escaped;
+        if character != '\\' {
+            escaped = false;
+        }
+    }
+    text.len()
+}
+
+fn is_identifier_start(character: char) -> bool {
+    character == '_' || character == '$' || character.is_alphabetic()
+}
+
+fn is_identifier_continue(character: char) -> bool {
+    is_identifier_start(character) || character.is_ascii_digit()
+}
+
+fn is_keyword(token: &str, language: SyntaxLanguage) -> bool {
+    let common = matches!(
+        token,
+        "as" | "async"
+            | "await"
+            | "break"
+            | "case"
+            | "catch"
+            | "class"
+            | "const"
+            | "continue"
+            | "default"
+            | "do"
+            | "else"
+            | "enum"
+            | "export"
+            | "extends"
+            | "false"
+            | "finally"
+            | "for"
+            | "from"
+            | "if"
+            | "import"
+            | "in"
+            | "interface"
+            | "let"
+            | "match"
+            | "new"
+            | "null"
+            | "return"
+            | "static"
+            | "struct"
+            | "switch"
+            | "throw"
+            | "trait"
+            | "true"
+            | "try"
+            | "type"
+            | "typeof"
+            | "var"
+            | "where"
+            | "while"
+            | "yield"
+    );
+    common
+        || match language {
+            SyntaxLanguage::Rust => matches!(
+                token,
+                "crate"
+                    | "dyn"
+                    | "extern"
+                    | "fn"
+                    | "impl"
+                    | "loop"
+                    | "mod"
+                    | "move"
+                    | "mut"
+                    | "pub"
+                    | "ref"
+                    | "self"
+                    | "Self"
+                    | "super"
+                    | "unsafe"
+                    | "use"
+            ),
+            SyntaxLanguage::JavaScript => matches!(token, "function" | "of" | "this" | "void"),
+            SyntaxLanguage::Python => matches!(
+                token,
+                "and"
+                    | "def"
+                    | "del"
+                    | "elif"
+                    | "except"
+                    | "global"
+                    | "is"
+                    | "lambda"
+                    | "not"
+                    | "or"
+                    | "pass"
+                    | "raise"
+                    | "with"
+            ),
+            SyntaxLanguage::Go => matches!(
+                token,
+                "chan"
+                    | "defer"
+                    | "fallthrough"
+                    | "func"
+                    | "go"
+                    | "map"
+                    | "package"
+                    | "range"
+                    | "select"
+            ),
+            SyntaxLanguage::CLike => matches!(
+                token,
+                "auto"
+                    | "boolean"
+                    | "char"
+                    | "double"
+                    | "final"
+                    | "float"
+                    | "int"
+                    | "long"
+                    | "namespace"
+                    | "private"
+                    | "protected"
+                    | "public"
+                    | "short"
+                    | "signed"
+                    | "sizeof"
+                    | "template"
+                    | "this"
+                    | "unsigned"
+                    | "virtual"
+                    | "void"
+                    | "volatile"
+            ),
+            SyntaxLanguage::Ruby => matches!(
+                token,
+                "alias"
+                    | "begin"
+                    | "def"
+                    | "defined"
+                    | "end"
+                    | "ensure"
+                    | "module"
+                    | "next"
+                    | "nil"
+                    | "redo"
+                    | "rescue"
+                    | "retry"
+                    | "then"
+                    | "unless"
+                    | "until"
+            ),
+            SyntaxLanguage::Shell => matches!(
+                token,
+                "case" | "done" | "elif" | "esac" | "fi" | "function" | "then"
+            ),
+            SyntaxLanguage::Data => false,
+            SyntaxLanguage::Sql => matches!(
+                token.to_ascii_lowercase().as_str(),
+                "alter"
+                    | "and"
+                    | "as"
+                    | "by"
+                    | "create"
+                    | "delete"
+                    | "distinct"
+                    | "drop"
+                    | "from"
+                    | "group"
+                    | "having"
+                    | "insert"
+                    | "into"
+                    | "join"
+                    | "limit"
+                    | "not"
+                    | "null"
+                    | "on"
+                    | "or"
+                    | "order"
+                    | "select"
+                    | "set"
+                    | "table"
+                    | "union"
+                    | "update"
+                    | "values"
+                    | "where"
+            ),
+            SyntaxLanguage::Web => matches!(token, "important" | "media" | "var"),
+        }
+}
+
+fn is_builtin_type(token: &str, language: SyntaxLanguage) -> bool {
+    match language {
+        SyntaxLanguage::Rust => matches!(
+            token,
+            "bool"
+                | "char"
+                | "f32"
+                | "f64"
+                | "i8"
+                | "i16"
+                | "i32"
+                | "i64"
+                | "i128"
+                | "isize"
+                | "str"
+                | "u8"
+                | "u16"
+                | "u32"
+                | "u64"
+                | "u128"
+                | "usize"
+        ),
+        SyntaxLanguage::JavaScript => matches!(
+            token,
+            "any" | "bigint" | "boolean" | "never" | "number" | "object" | "string" | "unknown"
+        ),
+        SyntaxLanguage::Python => matches!(
+            token,
+            "bool" | "bytes" | "dict" | "float" | "int" | "list" | "set" | "str" | "tuple"
+        ),
+        SyntaxLanguage::Go => matches!(
+            token,
+            "bool"
+                | "byte"
+                | "complex64"
+                | "complex128"
+                | "error"
+                | "float32"
+                | "float64"
+                | "int"
+                | "int8"
+                | "int16"
+                | "int32"
+                | "int64"
+                | "rune"
+                | "string"
+                | "uint"
+                | "uint8"
+                | "uint16"
+                | "uint32"
+                | "uint64"
+                | "uintptr"
+        ),
+        _ => false,
+    }
 }
 
 fn history_line(
@@ -1725,20 +2187,68 @@ mod tests {
 
     #[test]
     fn diff_lines_use_semantic_colors() {
-        assert_eq!(diff_line("+added", false, 80).style.fg, Some(Color::Green));
-        assert_eq!(diff_line("-removed", false, 80).style.fg, Some(Color::Red));
         assert_eq!(
-            diff_line("@@ -1 +1 @@", false, 80).style.fg,
+            diff_line("+added", false, 80, None).spans[0].style.fg,
+            Some(Color::Green)
+        );
+        assert_eq!(
+            diff_line("-removed", false, 80, None).spans[0].style.fg,
+            Some(Color::Red)
+        );
+        assert_eq!(
+            diff_line("@@ -1 +1 @@", false, 80, None).style.fg,
             Some(Color::Cyan)
         );
     }
 
     #[test]
     fn selected_diff_line_fills_the_viewport() {
-        let rendered = diff_line("+added", true, 80);
+        let rendered = diff_line("+added", true, 80, None);
 
         assert_eq!(rendered.style.bg, Some(Color::Green));
         assert_eq!(rendered.width(), 80);
+    }
+
+    #[test]
+    fn diff_code_uses_language_syntax_colors() {
+        let rendered = diff_line(
+            "+pub fn answer() -> usize { 42 // result",
+            false,
+            80,
+            Some(SyntaxLanguage::Rust),
+        );
+        let styled = rendered
+            .spans
+            .iter()
+            .map(|span| (span.content.as_ref(), span.style.fg))
+            .collect::<Vec<_>>();
+
+        assert!(styled.contains(&("pub", Some(Color::Magenta))));
+        assert!(styled.contains(&("fn", Some(Color::Magenta))));
+        assert!(styled.contains(&("answer", Some(Color::Cyan))));
+        assert!(styled.contains(&("usize", Some(Color::LightBlue))));
+        assert!(styled.contains(&("42", Some(Color::Cyan))));
+        assert!(styled.contains(&("// result", Some(Color::DarkGray))));
+    }
+
+    #[test]
+    fn diff_language_follows_the_current_file_header() {
+        let diff = vec![
+            "diff --git a/src/main.rs b/src/main.rs".into(),
+            "--- a/src/main.rs".into(),
+            "+++ b/src/main.rs".into(),
+            "@@ -1 +1 @@".into(),
+        ];
+
+        assert_eq!(
+            syntax_at_diff_line(&diff, diff.len()),
+            Some(SyntaxLanguage::Rust)
+        );
+        assert_eq!(
+            language_for_path("app.tsx"),
+            Some(SyntaxLanguage::JavaScript)
+        );
+        assert_eq!(language_for_path("image.png"), None);
     }
 
     #[test]
