@@ -32,7 +32,23 @@ Claude session.
 - Optional: an installed and authenticated `codex` or `claude` CLI for agent
   delivery
 
-## Install from source
+## Installation
+
+Prebuilt binaries are available from
+[GitHub Releases](https://github.com/sott0n/atig/releases) for Linux x86_64,
+Linux ARM64, macOS Intel, and macOS Apple Silicon. Download the archive for
+your platform, optionally verify it against the adjacent `.sha256` file, then
+install it on your `PATH`:
+
+```sh
+tar -xzf atig-vVERSION-TARGET.tar.gz
+install -m 755 atig-vVERSION-TARGET/atig ~/.local/bin/atig
+```
+
+Make sure `~/.local/bin` is included in your `PATH`. You can then run `atig`
+from inside any Git repository.
+
+To build from source instead:
 
 ```sh
 git clone https://github.com/sott0n/atig.git
@@ -52,6 +68,21 @@ Run `atig` from inside the Git repository you want to inspect:
 cd path/to/repository
 atig
 ```
+
+## Publishing a release
+
+Set the package version in `Cargo.toml`, commit it to `main`, and push a
+matching `v`-prefixed tag. For example, version `0.2.0` must use tag `v0.2.0`:
+
+```sh
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+The release workflow tests the tagged source, builds all four supported
+platform archives, generates SHA-256 checksums, and publishes a GitHub Release
+with automatically generated notes. A tag whose version does not match
+`Cargo.toml` is rejected.
 
 ## Basic workflow
 
