@@ -13,7 +13,9 @@ const MAX_EVENTS_PER_TICK: usize = 256;
 const MAX_UNDERSTANDING_HISTORY: usize = 6;
 const MAX_UNDERSTANDING_MESSAGE_CHARS: usize = 4_000;
 const MAX_CONTEXT_RANGE_LINES: usize = 80;
-const GUIDED_READING_QUESTION: &str = "Build a concise guided reading path for understanding how this code participates in the selected change. Explain this location first, then identify the most important related definitions, callers, state, and tests in the order a human should read them. For every reading step, inspect the destination code and annotate two to eight specific important lines with what each line does and why it matters. Keep the path focused.";
+const GUIDED_READING_QUESTION: &str = "選択した変更におけるこのコードの役割を説明し、入力・判断・結果・検証を理解するために本当に必要な関連コードだけを挙げてください。各関連箇所では、何を見るべきかを具体的に示し、重要な2〜8行へ注釈を付けてください。概要と関連箇所は簡潔にしてください。";
+const LEGACY_CODE_OVERVIEW_QUESTION: &str = "Explain this code's role in the selected change, then identify only the related code needed to understand its inputs, decisions, effects, and verification. For each related location, state concretely what the reader should look for and annotate two to eight important lines. Keep the overview and related locations focused.";
+const LEGACY_GUIDED_READING_QUESTION: &str = "Build a concise guided reading path for understanding how this code participates in the selected change. Explain this location first, then identify the most important related definitions, callers, state, and tests in the order a human should read them. For every reading step, inspect the destination code and annotate two to eight specific important lines with what each line does and why it matters. Keep the path focused.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
@@ -208,7 +210,12 @@ pub struct UnderstandingThread {
 
 impl UnderstandingThread {
     pub fn is_guided_reading(&self) -> bool {
-        self.question == GUIDED_READING_QUESTION
+        matches!(
+            self.question.as_str(),
+            GUIDED_READING_QUESTION
+                | LEGACY_CODE_OVERVIEW_QUESTION
+                | LEGACY_GUIDED_READING_QUESTION
+        )
     }
 }
 
@@ -1950,7 +1957,10 @@ impl App {
     }
 
     pub fn request_guided_reading(&mut self) {
-        self.dispatch_understanding(GUIDED_READING_QUESTION.into(), "Building reading path with");
+        self.dispatch_understanding(
+            GUIDED_READING_QUESTION.into(),
+            "Building code overview with",
+        );
     }
 
     fn dispatch_understanding(&mut self, question: String, progress: &str) {
@@ -2392,7 +2402,7 @@ impl App {
                         && references.iter().any(|point| point.annotations.is_empty())
                         && let Some(target) = self.agent_target.clone()
                     {
-                        self.message = "Reading path received · adding line explanations".into();
+                        self.message = "Related code found · adding line explanations".into();
                         self.persist_reviews();
                         self.dispatch_reading_annotations(index, &references, target);
                         return true;
@@ -2401,7 +2411,7 @@ impl App {
                     self.dispatched_comments.clear();
                     self.message = if guided_reading {
                         format!(
-                            "Agent reading path received · {} locations",
+                            "Code overview ready · {} related locations",
                             reference_count
                         )
                     } else {
@@ -3474,8 +3484,13 @@ fn format_understanding_request(
         format!("{file}:{line}-{end_line}")
     };
     let mut prompt = format!(
-        "Help a human understand the existing code at {location}. Answer the question using read-only inspection only. Do not edit, create, delete, or format files; do not commit or push. Explain the behavior and rationale from the code, cite repository-relative file:line locations for important claims, and say when something cannot be determined from the code. After your normal answer, append up to five important code references in exactly this form, without a Markdown code fence:\n<atig-references>\n[{{\"file\":\"relative/path.rs\",\"line\":123,\"symbol\":\"Type::method\",\"reason\":\"Why this location supports the explanation\",\"annotations\":[{{\"line\":123,\"comment\":\"What this line does and why it matters\"}}]}}]\n</atig-references>\nFor every reference, include two to eight concise annotations on the important code lines a human should notice. Annotation line numbers must belong to the same file. Use repository-relative post-change locations, an empty symbol when unavailable, and [] when no extra code should be read.\n"
+        "Help a human understand the existing code at {location}. Answer in the same language as the current question. Answer the question using read-only inspection only. Do not edit, create, delete, or format files; do not commit or push. Explain the behavior and rationale from the code, cite repository-relative file:line locations for important claims, and say when something cannot be determined from the code. After your normal answer, append up to five important code references in exactly this form, without a Markdown code fence:\n<atig-references>\n[{{\"file\":\"relative/path.rs\",\"line\":123,\"symbol\":\"Type::method\",\"reason\":\"Why this location supports the explanation\",\"annotations\":[{{\"line\":123,\"comment\":\"What this line does and why it matters\"}}]}}]\n</atig-references>\nFor every reference, include two to eight concise annotations on the important code lines a human should notice. Annotation line numbers must belong to the same file. Use repository-relative post-change locations, an empty symbol when unavailable, and [] when no extra code should be read.\n"
     );
+    if question == GUIDED_READING_QUESTION {
+        prompt.push_str(
+            "\nWrite the visible answer, every reference reason, and every line annotation in Japanese. This is a code overview, not a generic reading plan. Keep the visible answer concise and use exactly these three Markdown headings:\n### 役割\n### 流れ\n### 変更との関係\nDo not repeat file locations as a numbered reading order in the visible answer; the UI renders related locations separately. Choose references by relevance, not by an artificial sequence. Each reference reason must say what concrete behavior, value, or decision to look for at that destination. Avoid vague phrases such as ‘コンテキストを理解する’ or ‘仕組みを確認する’. Do not include the selected location merely to make it the first step.\n",
+        );
+    }
     let answered = previous
         .iter()
         .filter(|thread| thread.answer.is_some())
@@ -3519,7 +3534,7 @@ fn format_reading_annotation_request(
         .join("\n");
     let snapshots = excerpts.join("\n");
     format!(
-        "Add line-by-line explanations to this existing guided reading path:\n{locations}\n\nUse only the numbered reviewed-snapshot excerpts below as the source for annotations. Do not inspect the current worktree to choose annotation line numbers, because it may differ from the reviewed Git snapshot. Use read-only operations only. Do not edit, create, delete, or format files; do not commit or push. Return the same locations in the same order. For every location, annotate two to eight specific important code lines so a human can understand the control flow, state changes, inputs, outputs, and connection to the reviewed change. Attach each explanation to the exact executable statement or declaration it describes. Never annotate a blank, brace-only, or delimiter-only line. After a brief response, append exactly this manifest without a Markdown code fence:\n<atig-references>\n[{{\"file\":\"relative/path.rs\",\"line\":123,\"symbol\":\"Type::method\",\"reason\":\"Why this location matters\",\"annotations\":[{{\"line\":123,\"comment\":\"What this exact line does and why it matters\"}}]}}]\n</atig-references>\nAnnotation line numbers must exactly match a numbered line in the corresponding reviewed-snapshot excerpt. Do not omit annotations.\n\n{snapshots}"
+        "Add line-by-line explanations to these related code locations:\n{locations}\n\nWrite every reason and annotation in Japanese. Use only the numbered reviewed-snapshot excerpts below as the source for annotations. Do not inspect the current worktree to choose annotation line numbers, because it may differ from the reviewed Git snapshot. Use read-only operations only. Do not edit, create, delete, or format files; do not commit or push. Return the same locations in the same order. For every location, annotate two to eight specific important code lines so a human can understand the control flow, state changes, inputs, outputs, and connection to the reviewed change. Attach each explanation to the exact executable statement or declaration it describes. Never annotate a blank, brace-only, or delimiter-only line. After a brief response, append exactly this manifest without a Markdown code fence:\n<atig-references>\n[{{\"file\":\"relative/path.rs\",\"line\":123,\"symbol\":\"Type::method\",\"reason\":\"ここで見るべき具体的な動作や判断\",\"annotations\":[{{\"line\":123,\"comment\":\"この行の動作と重要な理由\"}}]}}]\n</atig-references>\nAnnotation line numbers must exactly match a numbered line in the corresponding reviewed-snapshot excerpt. Do not omit annotations.\n\n{snapshots}"
     )
 }
 
@@ -4502,7 +4517,7 @@ mod tests {
     }
 
     #[test]
-    fn guided_reading_prompt_requests_an_ordered_code_path() {
+    fn guided_reading_prompt_requests_a_focused_code_overview() {
         let prompt = format_understanding_request(
             "src/main.rs",
             20,
@@ -4512,7 +4527,13 @@ mod tests {
             &[],
         );
 
-        assert!(prompt.contains("in the order a human should read them"));
+        assert!(prompt.contains("This is a code overview, not a generic reading plan"));
+        assert!(prompt.contains("### 役割"));
+        assert!(prompt.contains("### 流れ"));
+        assert!(prompt.contains("### 変更との関係"));
+        assert!(prompt.contains("every line annotation in Japanese"));
+        assert!(prompt.contains("Choose references by relevance"));
+        assert!(prompt.contains("what concrete behavior, value, or decision to look for"));
         assert!(prompt.contains("up to five important code references"));
         assert!(prompt.contains("two to eight concise annotations"));
         assert!(prompt.contains("\"annotations\""));

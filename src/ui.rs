@@ -220,7 +220,7 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
             Span::styled(" ◆ ", Style::default().fg(THEME_SECONDARY)),
             Span::styled(
                 format!(
-                    "READING TRAIL · {}/{} visited · ]r start · T list",
+                    "RELATED CODE · {}/{} explored · ]r open · T list",
                     app.context_reading_visited.len(),
                     app.context_reading_path.len(),
                 ),
@@ -396,7 +396,7 @@ fn understanding_thread_box(
         vec![Line::from(vec![
             Span::styled("  ◆ ", Style::default().fg(THEME_SECONDARY)),
             Span::styled(
-                format!("AGENT READING GUIDE · {}", thread.agent),
+                format!("CODE OVERVIEW · {}", thread.agent),
                 Style::default()
                     .fg(THEME_SECONDARY)
                     .add_modifier(Modifier::BOLD),
@@ -449,10 +449,10 @@ fn understanding_thread_box(
                 match (thread.references.len(), hidden_earlier) {
                     (0, hidden) => format!("{hidden} earlier response(s) hidden"),
                     (references, 0) => format!(
-                        "READING TRAIL ABOVE · {references} location(s) · ]r next · T toggle list"
+                        "RELATED CODE · {references} location(s) · ]r open next · T toggle list"
                     ),
                     (references, hidden) => format!(
-                        "READING TRAIL ABOVE · {references} location(s) · {hidden} earlier response(s) hidden"
+                        "RELATED CODE · {references} location(s) · {hidden} earlier response(s) hidden"
                     ),
                 },
                 Style::default().fg(THEME_MUTED),
@@ -512,7 +512,7 @@ fn reading_arrival_lines(
         Span::styled(" ◆ ", Style::default().fg(THEME_SECONDARY)),
         Span::styled(
             format!(
-                "READING TRAIL · STEP {position}/{}",
+                "RELATED CODE · {position}/{}",
                 app.context_reading_path.len()
             ),
             Style::default()
@@ -533,9 +533,9 @@ fn reading_arrival_lines(
             Span::styled(" │ ", Style::default().fg(THEME_SECONDARY)),
             Span::styled(
                 if index == 0 {
-                    "WHY THIS CODE · "
+                    "LOOK FOR · "
                 } else {
-                    "                "
+                    "           "
                 },
                 Style::default()
                     .fg(THEME_ACCENT)
@@ -547,7 +547,7 @@ fn reading_arrival_lines(
     lines.push(Line::from(vec![
         Span::styled(" └ ", Style::default().fg(THEME_SECONDARY)),
         Span::styled(
-            "temporary notes point to exact lines · ]r next · [r previous · Ctrl-o back · T full trail",
+            "notes point to exact lines · ]r next · [r previous · Ctrl-o back · T all related code",
             Style::default().fg(THEME_MUTED),
         ),
     ]));
@@ -1392,7 +1392,7 @@ fn agent_intent_box(intent: &AgentIntent, width: usize) -> Vec<Line<'static>> {
         lines.push(Line::from(vec![
             Span::styled("  ├ ", Style::default().fg(THEME_SECONDARY)),
             Span::styled(
-                format!("READ {}", index + 1),
+                format!("RELATED {}", index + 1),
                 Style::default()
                     .fg(THEME_SECONDARY)
                     .add_modifier(Modifier::BOLD),
@@ -2699,7 +2699,7 @@ mod tests {
         assert!(text.contains("Why retry here?"));
         assert!(text.contains("LATEST ANSWER · codex:session-1"));
         assert!(text.contains("shared request boundary"));
-        assert!(text.contains("READING TRAIL ABOVE · 1 location(s)"));
+        assert!(text.contains("RELATED CODE · 1 location(s)"));
         assert!(text.contains("1 earlier response(s) hidden"));
         assert!(!text.contains("READ 1"));
     }
@@ -2751,8 +2751,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(text.contains("READING TRAIL · STEP 1/1"));
-        assert!(text.contains("WHY THIS CODE"));
+        assert!(text.contains("RELATED CODE · 1/1"));
+        assert!(text.contains("LOOK FOR"));
         assert!(text.contains("shared request boundary"));
         assert!(text.contains("Ctrl-o back"));
     }
@@ -2932,7 +2932,7 @@ mod tests {
 
         assert!(text.contains("◆ AGENT INTENT · src/main.rs:12"));
         assert!(text.contains("Keep parsing separate from rendering"));
-        assert!(text.contains("READ 1 · parse · src/parser.rs:8"));
+        assert!(text.contains("RELATED 1 · parse · src/parser.rs:8"));
         assert!(text.contains("Follow the parsing entry point"));
         assert_eq!(
             visible_agent_response(
