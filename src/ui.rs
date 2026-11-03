@@ -15,6 +15,28 @@ use crate::app::{
 };
 use crate::git::{CommitLine, HistoryLine, fit_column, format_refs};
 
+// Follow tig's default terminal palette instead of imposing an RGB theme.
+const THEME_TEXT: Color = Color::White;
+const THEME_BODY: Color = Color::Reset;
+const THEME_MUTED: Color = Color::DarkGray;
+const THEME_COOL: Color = Color::Blue;
+const THEME_ACCENT: Color = Color::Cyan;
+const THEME_POSITIVE: Color = Color::Green;
+const THEME_NEGATIVE: Color = Color::Red;
+const THEME_WARNING: Color = Color::Yellow;
+const THEME_SECONDARY: Color = Color::Magenta;
+const THEME_TYPE: Color = Color::Cyan;
+const THEME_SELECTION_BACKGROUND: Color = Color::Green;
+const THEME_RANGE_BACKGROUND: Color = Color::Blue;
+const THEME_STATUS_BACKGROUND: Color = Color::Blue;
+const THEME_PROMPT_BACKGROUND: Color = Color::Magenta;
+const THEME_DANGER_BACKGROUND: Color = Color::Red;
+const THEME_SYMBOL_BACKGROUND: Color = Color::Blue;
+const DIFF_ADDED_MARKER: Color = Color::Green;
+const DIFF_REMOVED_MARKER: Color = Color::Red;
+const ADDED_LINE_BACKGROUND: Color = Color::Rgb(27, 51, 36);
+const REMOVED_LINE_BACKGROUND: Color = Color::Rgb(58, 35, 39);
+
 pub fn draw(frame: &mut Frame, app: &App) {
     let areas = Layout::default()
         .direction(Direction::Vertical)
@@ -102,8 +124,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
             frame.render_widget(
                 Paragraph::new(status).style(
                     Style::default()
-                        .fg(Color::White)
-                        .bg(Color::Blue)
+                        .fg(THEME_TEXT)
+                        .bg(THEME_STATUS_BACKGROUND)
                         .add_modifier(Modifier::BOLD),
                 ),
                 areas[1],
@@ -181,8 +203,8 @@ fn draw_help(frame: &mut Frame, areas: &[ratatui::layout::Rect]) {
     frame.render_widget(
         Paragraph::new("Help - q, Esc, or ? to return").style(
             Style::default()
-                .fg(Color::White)
-                .bg(Color::Blue)
+                .fg(THEME_TEXT)
+                .bg(THEME_STATUS_BACKGROUND)
                 .add_modifier(Modifier::BOLD),
         ),
         areas[1],
@@ -195,7 +217,7 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
         reading_arrival_lines(app, point, areas[0].width as usize)
     } else if !app.context_reading_path.is_empty() {
         vec![Line::from(vec![
-            Span::styled(" ◆ ", Style::default().fg(Color::Magenta)),
+            Span::styled(" ◆ ", Style::default().fg(THEME_SECONDARY)),
             Span::styled(
                 format!(
                     "READING TRAIL · {}/{} visited · ]r start · T list",
@@ -203,7 +225,7 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
                     app.context_reading_path.len(),
                 ),
                 Style::default()
-                    .fg(Color::Magenta)
+                    .fg(THEME_SECONDARY)
                     .add_modifier(Modifier::BOLD),
             ),
         ])]
@@ -229,25 +251,24 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
                     })
                     .sum::<usize>()
                     + app
-                        .understanding_threads_at_context(index + 1)
-                        .iter()
-                        .enumerate()
-                        .map(|(turn, thread)| {
+                        .latest_understanding_thread_at_context(index + 1)
+                        .map(|(thread, hidden)| {
                             understanding_thread_box(
                                 thread,
-                                turn + 1,
+                                hidden,
                                 areas[0].width as usize,
                                 app.dispatch_animation_frame,
                             )
                             .len()
                         })
-                        .sum::<usize>()
+                        .unwrap_or(0)
             })
             .sum::<usize>();
     if rows_before_selection >= height {
         start = app.context_cursor;
     }
     let number_width = app.context_lines.len().max(1).to_string().len();
+    let syntax = language_for_path(&app.context_path);
     let mut lines = trail_header;
     for (index, text) in app.context_lines.iter().enumerate().skip(start) {
         if lines.len() >= height {
@@ -278,17 +299,16 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
                     .then(|| app.current_context_symbol_char_span())
                     .flatten(),
             },
-            app.context_horizontal_scroll,
-            areas[0].width as usize,
+            SourceViewport {
+                syntax,
+                horizontal_scroll: app.context_horizontal_scroll,
+                width: areas[0].width as usize,
+            },
         ));
-        for (turn, thread) in app
-            .understanding_threads_at_context(index + 1)
-            .into_iter()
-            .enumerate()
-        {
+        if let Some((thread, hidden)) = app.latest_understanding_thread_at_context(index + 1) {
             lines.extend(understanding_thread_box(
                 thread,
-                turn + 1,
+                hidden,
                 areas[0].width as usize,
                 app.dispatch_animation_frame,
             ));
@@ -302,8 +322,8 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
         frame.render_widget(
             Paragraph::new(prompt).style(
                 Style::default()
-                    .fg(Color::White)
-                    .bg(Color::Magenta)
+                    .fg(THEME_TEXT)
+                    .bg(THEME_PROMPT_BACKGROUND)
                     .add_modifier(Modifier::BOLD),
             ),
             areas[1],
@@ -356,8 +376,8 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
     frame.render_widget(
         Paragraph::new(format!("{left}{}{right}", " ".repeat(gap))).style(
             Style::default()
-                .fg(Color::White)
-                .bg(Color::Blue)
+                .fg(THEME_TEXT)
+                .bg(THEME_STATUS_BACKGROUND)
                 .add_modifier(Modifier::BOLD),
         ),
         areas[1],
@@ -366,77 +386,78 @@ fn draw_context(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
 
 fn understanding_thread_box(
     thread: &crate::app::UnderstandingThread,
-    turn: usize,
+    hidden_earlier: usize,
     width: usize,
     animation_frame: usize,
 ) -> Vec<Line<'static>> {
     let content_width = width.saturating_sub(4).max(1);
-    let mut lines = vec![Line::from(vec![
-        Span::styled("  ? ", Style::default().fg(Color::Cyan)),
-        Span::styled(
-            if turn == 1 {
-                "YOU ASKED".to_string()
-            } else {
-                format!("FOLLOW-UP {turn}")
-            },
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            thread
-                .end_line
-                .filter(|end| *end != thread.line)
-                .map(|end| format!(" · LINES {}-{end}", thread.line))
-                .unwrap_or_default(),
-            Style::default().fg(Color::DarkGray),
-        ),
-    ])];
-    for chunk in wrap_comment_body(&thread.question, content_width) {
-        lines.push(Line::from(vec![
-            Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
-            Span::styled(chunk, Style::default().fg(Color::White)),
+    let guided = thread.is_guided_reading();
+    let mut lines = if guided {
+        vec![Line::from(vec![
+            Span::styled("  ◆ ", Style::default().fg(THEME_SECONDARY)),
+            Span::styled(
+                format!("AGENT READING GUIDE · {}", thread.agent),
+                Style::default()
+                    .fg(THEME_SECONDARY)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])]
+    } else {
+        let mut question = vec![Line::from(vec![
+            Span::styled("  ? ", Style::default().fg(THEME_ACCENT)),
+            Span::styled(
+                "QUESTION",
+                Style::default()
+                    .fg(THEME_ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                thread
+                    .end_line
+                    .filter(|end| *end != thread.line)
+                    .map(|end| format!(" · LINES {}-{end}", thread.line))
+                    .unwrap_or_default(),
+                Style::default().fg(THEME_MUTED),
+            ),
+        ])];
+        for chunk in wrap_comment_body(&thread.question, content_width) {
+            question.push(Line::from(vec![
+                Span::styled("  │ ", Style::default().fg(THEME_MUTED)),
+                Span::styled(chunk, Style::default().fg(THEME_TEXT)),
+            ]));
+        }
+        question.push(Line::from(vec![
+            Span::styled("  ◆ ", Style::default().fg(THEME_SECONDARY)),
+            Span::styled(
+                format!("LATEST ANSWER · {}", thread.agent),
+                Style::default()
+                    .fg(THEME_SECONDARY)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]));
-    }
-    lines.push(Line::from(vec![
-        Span::styled("  ◆ ", Style::default().fg(Color::Magenta)),
-        Span::styled(
-            format!("AGENT · {}", thread.agent),
-            Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]));
+        question
+    };
     let answer = thread
         .answer
         .clone()
         .unwrap_or_else(|| format!("Thinking{}", ".".repeat(animation_frame % 3 + 1)));
-    for chunk in wrap_comment_body(&answer, content_width) {
+    append_agent_response(&mut lines, &answer, content_width);
+    if !thread.references.is_empty() || hidden_earlier > 0 {
         lines.push(Line::from(vec![
-            Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
-            Span::styled(chunk, Style::default().fg(Color::White)),
-        ]));
-    }
-    for (index, point) in thread.references.iter().enumerate() {
-        lines.push(Line::from(vec![
-            Span::styled("  ├ ", Style::default().fg(Color::Magenta)),
+            Span::styled("  └ ", Style::default().fg(THEME_MUTED)),
             Span::styled(
-                format!("READ {}", index + 1),
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(" · {}", reading_point_location(point)),
-                Style::default().fg(Color::DarkGray),
+                match (thread.references.len(), hidden_earlier) {
+                    (0, hidden) => format!("{hidden} earlier response(s) hidden"),
+                    (references, 0) => format!(
+                        "READING TRAIL ABOVE · {references} location(s) · ]r next · T toggle list"
+                    ),
+                    (references, hidden) => format!(
+                        "READING TRAIL ABOVE · {references} location(s) · {hidden} earlier response(s) hidden"
+                    ),
+                },
+                Style::default().fg(THEME_MUTED),
             ),
         ]));
-        for chunk in wrap_comment_body(&point.reason, content_width) {
-            lines.push(Line::from(vec![
-                Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
-                Span::styled(chunk, Style::default().fg(Color::White)),
-            ]));
-        }
     }
     lines
 }
@@ -460,12 +481,12 @@ fn temporary_annotation_lines(
                     } else {
                         continuation.clone()
                     },
-                    Style::default().fg(Color::Cyan),
+                    Style::default().fg(THEME_ACCENT),
                 ),
                 Span::styled(
                     chunk,
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(THEME_ACCENT)
                         .add_modifier(Modifier::ITALIC),
                 ),
             ])
@@ -488,19 +509,19 @@ fn reading_arrival_lines(
 ) -> Vec<Line<'static>> {
     let position = app.context_reading_index.unwrap_or(0) + 1;
     let mut lines = vec![Line::from(vec![
-        Span::styled(" ◆ ", Style::default().fg(Color::Magenta)),
+        Span::styled(" ◆ ", Style::default().fg(THEME_SECONDARY)),
         Span::styled(
             format!(
                 "READING TRAIL · STEP {position}/{}",
                 app.context_reading_path.len()
             ),
             Style::default()
-                .fg(Color::Magenta)
+                .fg(THEME_SECONDARY)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!(" · {}", reading_point_location(point)),
-            Style::default().fg(Color::White),
+            Style::default().fg(THEME_TEXT),
         ),
     ])];
     let reason_width = width.saturating_sub(20).max(1);
@@ -509,7 +530,7 @@ fn reading_arrival_lines(
         .enumerate()
     {
         lines.push(Line::from(vec![
-            Span::styled(" │ ", Style::default().fg(Color::Magenta)),
+            Span::styled(" │ ", Style::default().fg(THEME_SECONDARY)),
             Span::styled(
                 if index == 0 {
                     "WHY THIS CODE · "
@@ -517,17 +538,17 @@ fn reading_arrival_lines(
                     "                "
                 },
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(THEME_ACCENT)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(chunk, Style::default().fg(Color::White)),
+            Span::styled(chunk, Style::default().fg(THEME_TEXT)),
         ]));
     }
     lines.push(Line::from(vec![
-        Span::styled(" └ ", Style::default().fg(Color::Magenta)),
+        Span::styled(" └ ", Style::default().fg(THEME_SECONDARY)),
         Span::styled(
             "temporary notes point to exact lines · ]r next · [r previous · Ctrl-o back · T full trail",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(THEME_MUTED),
         ),
     ]));
     lines
@@ -541,11 +562,11 @@ fn reading_trail_lines(app: &App) -> Vec<Line<'static>> {
             let current = app.context_reading_index == Some(index);
             let visited = app.context_reading_visited.contains(&index);
             let (marker, color) = if current {
-                ('●', Color::Cyan)
+                ('●', THEME_ACCENT)
             } else if visited {
-                ('✓', Color::Green)
+                ('✓', THEME_POSITIVE)
             } else {
-                ('○', Color::DarkGray)
+                ('○', THEME_MUTED)
             };
             Line::from(vec![
                 Span::styled(format!("   {marker} "), Style::default().fg(color)),
@@ -555,11 +576,11 @@ fn reading_trail_lines(app: &App) -> Vec<Line<'static>> {
                 ),
                 Span::styled(
                     reading_point_location(point),
-                    Style::default().fg(Color::White),
+                    Style::default().fg(THEME_TEXT),
                 ),
                 Span::styled(
                     format!(" · {}", point.reason),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(THEME_MUTED),
                 ),
             ])
         })
@@ -580,15 +601,26 @@ struct SourceGutter {
     symbol: Option<(usize, usize)>,
 }
 
+#[derive(Clone, Copy)]
+struct SourceViewport {
+    syntax: Option<SyntaxLanguage>,
+    horizontal_scroll: usize,
+    width: usize,
+}
+
 fn source_line(
     number: usize,
     text: &str,
     number_width: usize,
     selection: SourceSelection,
     gutter: SourceGutter,
-    horizontal_scroll: usize,
-    viewport_width: usize,
+    viewport: SourceViewport,
 ) -> Line<'static> {
+    let SourceViewport {
+        syntax,
+        horizontal_scroll,
+        width: viewport_width,
+    } = viewport;
     let marker = match gutter.changed_side {
         Some(crate::git::DiffSide::New) => '+',
         Some(crate::git::DiffSide::Old) => '-',
@@ -596,79 +628,107 @@ fn source_line(
     };
     let bookmark_marker = if gutter.bookmarked { '◆' } else { ' ' };
     let prefix = format!("{marker}{bookmark_marker}{number:>number_width$} │ ");
-    let visible_text = visible_source_text(
-        text,
-        horizontal_scroll,
-        viewport_width.saturating_sub(prefix.chars().count()),
-    );
+    let code_width = viewport_width.saturating_sub(prefix.chars().count());
     if matches!(selection, SourceSelection::Cursor) {
         let mut spans = vec![Span::styled(
             prefix,
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Green)
+                .fg(THEME_TEXT)
+                .bg(THEME_SELECTION_BACKGROUND)
                 .add_modifier(Modifier::BOLD),
         )];
-        spans.extend(selected_source_spans(
+        spans.extend(source_code_spans(
             text,
             horizontal_scroll,
-            viewport_width.saturating_sub(spans[0].width()),
+            code_width,
+            syntax,
+            Style::default().fg(THEME_TEXT),
+            Some(THEME_SELECTION_BACKGROUND),
             gutter.symbol,
         ));
         let mut line = Line::from(spans);
         line.push_span(Span::styled(
             " ".repeat(viewport_width.saturating_sub(line.width())),
-            Style::default().bg(Color::Green),
+            Style::default().bg(THEME_SELECTION_BACKGROUND),
         ));
         line
     } else if matches!(selection, SourceSelection::Range) {
-        let mut line = Line::from(vec![
-            Span::styled(
-                prefix,
-                Style::default()
-                    .fg(Color::White)
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                visible_text,
-                Style::default().fg(Color::White).bg(Color::DarkGray),
-            ),
-        ]);
+        let mut spans = vec![Span::styled(
+            prefix,
+            Style::default()
+                .fg(THEME_TEXT)
+                .bg(THEME_RANGE_BACKGROUND)
+                .add_modifier(Modifier::BOLD),
+        )];
+        spans.extend(source_code_spans(
+            text,
+            horizontal_scroll,
+            code_width,
+            syntax,
+            Style::default().fg(THEME_TEXT),
+            Some(THEME_RANGE_BACKGROUND),
+            None,
+        ));
+        let mut line = Line::from(spans);
         line.push_span(Span::styled(
             " ".repeat(viewport_width.saturating_sub(line.width())),
-            Style::default().bg(Color::DarkGray),
+            Style::default().bg(THEME_RANGE_BACKGROUND),
         ));
         line
     } else {
         let marker_color = match gutter.changed_side {
-            Some(crate::git::DiffSide::New) => Color::Green,
-            Some(crate::git::DiffSide::Old) => Color::Red,
-            None => Color::DarkGray,
+            Some(crate::git::DiffSide::New) => DIFF_ADDED_MARKER,
+            Some(crate::git::DiffSide::Old) => DIFF_REMOVED_MARKER,
+            None => THEME_MUTED,
         };
-        Line::from(vec![
+        let mut spans = vec![
             Span::styled(marker.to_string(), Style::default().fg(marker_color)),
             Span::styled(
                 bookmark_marker.to_string(),
                 Style::default().fg(if gutter.bookmarked {
-                    Color::Cyan
+                    THEME_ACCENT
                 } else {
-                    Color::DarkGray
+                    THEME_MUTED
                 }),
             ),
             Span::styled(
                 format!("{number:>number_width$} │ "),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(THEME_MUTED),
             ),
-            Span::raw(visible_text),
-        ])
+        ];
+        spans.extend(source_code_spans(
+            text,
+            horizontal_scroll,
+            code_width,
+            syntax,
+            Style::default(),
+            None,
+            None,
+        ));
+        let background = match gutter.changed_side {
+            Some(crate::git::DiffSide::New) => Some(ADDED_LINE_BACKGROUND),
+            Some(crate::git::DiffSide::Old) => Some(REMOVED_LINE_BACKGROUND),
+            None => None,
+        };
+        let mut line = Line::from(spans);
+        if let Some(color) = background {
+            line = line.style(Style::default().bg(color));
+            line.push_span(Span::styled(
+                " ".repeat(viewport_width.saturating_sub(line.width())),
+                Style::default().bg(color),
+            ));
+        }
+        line
     }
 }
 
-fn selected_source_spans(
+fn source_code_spans(
     text: &str,
     offset: usize,
     width: usize,
+    syntax: Option<SyntaxLanguage>,
+    base: Style,
+    background: Option<Color>,
     symbol: Option<(usize, usize)>,
 ) -> Vec<Span<'static>> {
     let characters = text.chars().collect::<Vec<_>>();
@@ -678,45 +738,32 @@ fn selected_source_spans(
     let right = usize::from(characters.len().saturating_sub(offset) > available_without_left);
     let body_width = width.saturating_sub(left + right);
     let end = offset.saturating_add(body_width).min(characters.len());
-    let base = Style::default().fg(Color::Black).bg(Color::Green);
+    let with_background = |style: Style| match background {
+        Some(color) => style.bg(color),
+        None => style,
+    };
+    let base = with_background(base);
     let selected = Style::default()
-        .fg(Color::Black)
-        .bg(Color::Yellow)
+        .fg(THEME_TEXT)
+        .bg(THEME_SYMBOL_BACKGROUND)
         .add_modifier(Modifier::BOLD);
     let mut spans = Vec::new();
     if left > 0 {
         spans.push(Span::styled("‹", base));
     }
-    if let Some((symbol_start, symbol_end)) = symbol {
-        let highlight_start = symbol_start.max(offset).min(end);
-        let highlight_end = symbol_end.max(highlight_start).min(end);
-        if offset < highlight_start {
-            spans.push(Span::styled(
-                characters[offset..highlight_start]
-                    .iter()
-                    .collect::<String>(),
-                base,
-            ));
+    let body = characters[offset..end].iter().collect::<String>();
+    let mut source_position = offset;
+    for token in highlight_code(&body, syntax, base) {
+        for character in token.content.chars() {
+            let style =
+                if symbol.is_some_and(|(start, end)| (start..end).contains(&source_position)) {
+                    selected
+                } else {
+                    with_background(token.style)
+                };
+            push_styled_character(&mut spans, character, style);
+            source_position += 1;
         }
-        if highlight_start < highlight_end {
-            spans.push(Span::styled(
-                characters[highlight_start..highlight_end]
-                    .iter()
-                    .collect::<String>(),
-                selected,
-            ));
-        }
-        if highlight_end < end {
-            spans.push(Span::styled(
-                characters[highlight_end..end].iter().collect::<String>(),
-                base,
-            ));
-        }
-    } else {
-        spans.push(Span::styled(
-            characters[offset..end].iter().collect::<String>(),
-            base,
-        ));
     }
     if right > 0 {
         spans.push(Span::styled("›", base));
@@ -724,6 +771,17 @@ fn selected_source_spans(
     spans
 }
 
+fn push_styled_character(spans: &mut Vec<Span<'static>>, character: char, style: Style) {
+    if let Some(previous) = spans.last_mut()
+        && previous.style == style
+    {
+        previous.content.to_mut().push(character);
+    } else {
+        spans.push(Span::styled(character.to_string(), style));
+    }
+}
+
+#[cfg(test)]
 fn visible_source_text(text: &str, offset: usize, width: usize) -> String {
     if width == 0 {
         return String::new();
@@ -774,8 +832,8 @@ fn draw_files(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
                 let mut line = Line::styled(
                     text,
                     Style::default()
-                        .fg(Color::White)
-                        .bg(Color::Green)
+                        .fg(THEME_TEXT)
+                        .bg(THEME_SELECTION_BACKGROUND)
                         .add_modifier(Modifier::BOLD),
                 );
                 line.push_span(Span::raw(
@@ -786,9 +844,9 @@ fn draw_files(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
                 Line::styled(
                     text,
                     Style::default().fg(if file.agent_changed {
-                        Color::Magenta
+                        THEME_SECONDARY
                     } else {
-                        Color::White
+                        THEME_TEXT
                     }),
                 )
             }
@@ -799,8 +857,8 @@ fn draw_files(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
         Paragraph::new("Δ Agent changed  ◆ intents  ● reviews  j/k move  Enter jump  q back")
             .style(
                 Style::default()
-                    .fg(Color::White)
-                    .bg(Color::Blue)
+                    .fg(THEME_TEXT)
+                    .bg(THEME_STATUS_BACKGROUND)
                     .add_modifier(Modifier::BOLD),
             ),
         areas[1],
@@ -832,8 +890,8 @@ fn draw_sessions(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) 
                 let mut line = Line::styled(
                     text,
                     Style::default()
-                        .fg(Color::White)
-                        .bg(Color::Green)
+                        .fg(THEME_TEXT)
+                        .bg(THEME_SELECTION_BACKGROUND)
                         .add_modifier(Modifier::BOLD),
                 );
                 line.push_span(Span::raw(
@@ -861,8 +919,8 @@ fn draw_sessions(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) 
     frame.render_widget(
         Paragraph::new(format!("{left}{}{right}", " ".repeat(gap))).style(
             Style::default()
-                .fg(Color::White)
-                .bg(Color::Blue)
+                .fg(THEME_TEXT)
+                .bg(THEME_STATUS_BACKGROUND)
                 .add_modifier(Modifier::BOLD),
         ),
         areas[1],
@@ -888,17 +946,17 @@ fn draw_repository_search(frame: &mut Frame, app: &App, areas: &[ratatui::layout
                 spans.push(Span::styled(
                     format!(" {label:<7} "),
                     Style::default()
-                        .fg(Color::Black)
+                        .fg(THEME_TEXT)
                         .bg(color)
                         .add_modifier(Modifier::BOLD),
                 ));
                 spans.push(Span::raw(" "));
             }
             spans.extend([
-                Span::styled(found.path.clone(), Style::default().fg(Color::Cyan)),
+                Span::styled(found.path.clone(), Style::default().fg(THEME_ACCENT)),
                 Span::styled(
                     format!(":{} ", found.line),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(THEME_WARNING),
                 ),
                 Span::raw(found.text.trim().to_string()),
             ]);
@@ -906,13 +964,13 @@ fn draw_repository_search(frame: &mut Frame, app: &App, areas: &[ratatui::layout
             if index == app.repository_search_selected {
                 line = line.style(
                     Style::default()
-                        .fg(Color::White)
-                        .bg(Color::Green)
+                        .fg(THEME_TEXT)
+                        .bg(THEME_SELECTION_BACKGROUND)
                         .add_modifier(Modifier::BOLD),
                 );
                 line.push_span(Span::styled(
                     " ".repeat((areas[0].width as usize).saturating_sub(line.width())),
-                    Style::default().bg(Color::Green),
+                    Style::default().bg(THEME_SELECTION_BACKGROUND),
                 ));
             }
             line
@@ -951,8 +1009,8 @@ fn draw_repository_search(frame: &mut Frame, app: &App, areas: &[ratatui::layout
     frame.render_widget(
         Paragraph::new(format!("{left}{}{right}", " ".repeat(gap))).style(
             Style::default()
-                .fg(Color::White)
-                .bg(Color::Blue)
+                .fg(THEME_TEXT)
+                .bg(THEME_STATUS_BACKGROUND)
                 .add_modifier(Modifier::BOLD),
         ),
         areas[1],
@@ -961,11 +1019,11 @@ fn draw_repository_search(frame: &mut Frame, app: &App, areas: &[ratatui::layout
 
 fn impact_style(impact: ImpactKind) -> (&'static str, Color) {
     match impact {
-        ImpactKind::Changed => ("CHANGED", Color::Magenta),
-        ImpactKind::Definition => ("DEF", Color::Cyan),
-        ImpactKind::Test => ("TEST", Color::Yellow),
-        ImpactKind::Call => ("CALL", Color::Green),
-        ImpactKind::Reference => ("REF", Color::DarkGray),
+        ImpactKind::Changed => ("CHANGED", THEME_SECONDARY),
+        ImpactKind::Definition => ("DEF", THEME_ACCENT),
+        ImpactKind::Test => ("TEST", THEME_WARNING),
+        ImpactKind::Call => ("CALL", THEME_POSITIVE),
+        ImpactKind::Reference => ("REF", THEME_MUTED),
     }
 }
 
@@ -992,8 +1050,8 @@ fn draw_comments(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) 
                 let mut line = Line::styled(
                     text,
                     Style::default()
-                        .fg(Color::White)
-                        .bg(Color::Green)
+                        .fg(THEME_TEXT)
+                        .bg(THEME_SELECTION_BACKGROUND)
                         .add_modifier(Modifier::BOLD),
                 );
                 line.push_span(Span::raw(
@@ -1025,8 +1083,8 @@ fn draw_comments(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) 
     frame.render_widget(
         Paragraph::new(status).style(
             Style::default()
-                .fg(Color::White)
-                .bg(Color::Blue)
+                .fg(THEME_TEXT)
+                .bg(THEME_STATUS_BACKGROUND)
                 .add_modifier(Modifier::BOLD),
         ),
         areas[1],
@@ -1095,8 +1153,8 @@ fn draw_send_confirmation(frame: &mut Frame, app: &App, area: ratatui::layout::R
     frame.render_widget(
         Paragraph::new(prompt).style(
             Style::default()
-                .fg(Color::White)
-                .bg(Color::Red)
+                .fg(THEME_TEXT)
+                .bg(THEME_DANGER_BACKGROUND)
                 .add_modifier(Modifier::BOLD),
         ),
         area,
@@ -1191,8 +1249,8 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
         frame.render_widget(
             Paragraph::new(status).style(
                 Style::default()
-                    .fg(Color::White)
-                    .bg(Color::Blue)
+                    .fg(THEME_TEXT)
+                    .bg(THEME_STATUS_BACKGROUND)
                     .add_modifier(Modifier::BOLD),
             ),
             areas[1],
@@ -1261,8 +1319,8 @@ fn draw_diff(frame: &mut Frame, app: &App, areas: &[ratatui::layout::Rect]) {
     frame.render_widget(
         Paragraph::new(format!("{left}{}{right}", " ".repeat(gap))).style(
             Style::default()
-                .fg(Color::White)
-                .bg(Color::Blue)
+                .fg(THEME_TEXT)
+                .bg(THEME_STATUS_BACKGROUND)
                 .add_modifier(Modifier::BOLD),
         ),
         areas[1],
@@ -1312,42 +1370,42 @@ fn rendered_diff_row_height(
 fn agent_intent_box(intent: &AgentIntent, width: usize) -> Vec<Line<'static>> {
     let content_width = width.saturating_sub(4).max(1);
     let mut lines = vec![Line::from(vec![
-        Span::styled("  ◆ ", Style::default().fg(Color::Magenta)),
+        Span::styled("  ◆ ", Style::default().fg(THEME_SECONDARY)),
         Span::styled(
             "AGENT INTENT",
             Style::default()
-                .fg(Color::Magenta)
+                .fg(THEME_SECONDARY)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!(" · {}:{}", intent.file, intent.line),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(THEME_MUTED),
         ),
     ])];
     for chunk in wrap_comment_body(&intent.intent, content_width) {
         lines.push(Line::from(vec![
-            Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
-            Span::styled(chunk, Style::default().fg(Color::White)),
+            Span::styled("  │ ", Style::default().fg(THEME_MUTED)),
+            Span::styled(chunk, Style::default().fg(THEME_TEXT)),
         ]));
     }
     for (index, point) in intent.reading_path.iter().enumerate() {
         lines.push(Line::from(vec![
-            Span::styled("  ├ ", Style::default().fg(Color::Magenta)),
+            Span::styled("  ├ ", Style::default().fg(THEME_SECONDARY)),
             Span::styled(
                 format!("READ {}", index + 1),
                 Style::default()
-                    .fg(Color::Magenta)
+                    .fg(THEME_SECONDARY)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!(" · {}", reading_point_location(point)),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(THEME_MUTED),
             ),
         ]));
         for chunk in wrap_comment_body(&point.reason, content_width) {
             lines.push(Line::from(vec![
-                Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
-                Span::styled(chunk, Style::default().fg(Color::White)),
+                Span::styled("  │ ", Style::default().fg(THEME_MUTED)),
+                Span::styled(chunk, Style::default().fg(THEME_TEXT)),
             ]));
         }
     }
@@ -1362,9 +1420,9 @@ fn saved_comment_box(
 ) -> Vec<Line<'static>> {
     let root_selected = selection == Some(None);
     let root_color = if root_selected {
-        Color::Green
+        THEME_POSITIVE
     } else {
-        Color::Yellow
+        THEME_WARNING
     };
     let mut lines = vec![Line::from(vec![
         Span::styled(
@@ -1377,23 +1435,25 @@ fn saved_comment_box(
         ),
         Span::styled(
             format!(" · {}", comment.scope.label()),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(THEME_MUTED),
         ),
     ])];
     let content_width = width.saturating_sub(4).max(1);
     for chunk in wrap_comment_body(&comment.body, content_width) {
         lines.push(Line::from(vec![
-            Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
-            Span::styled(chunk, Style::default().fg(Color::White)),
+            Span::styled("  │ ", Style::default().fg(THEME_MUTED)),
+            Span::styled(chunk, Style::default().fg(THEME_TEXT)),
         ]));
     }
     for (thread_index, message) in comment.thread.iter().enumerate() {
         let selected = selection == Some(Some(thread_index));
-        let (label, role_color, marker) = match &message.role {
-            ReviewThreadRole::Human => ("YOU".to_string(), Color::Cyan, "  ● "),
-            ReviewThreadRole::Agent(agent) => (format!("AGENT · {agent}"), Color::Magenta, "  ◆ "),
+        let (label, role_color, marker, agent_response) = match &message.role {
+            ReviewThreadRole::Human => ("YOU".to_string(), THEME_ACCENT, "  ● ", false),
+            ReviewThreadRole::Agent(agent) => {
+                (format!("AGENT · {agent}"), THEME_SECONDARY, "  ◆ ", true)
+            }
         };
-        let color = if selected { Color::Green } else { role_color };
+        let color = if selected { THEME_POSITIVE } else { role_color };
         lines.push(Line::from(vec![
             Span::styled(
                 if selected { "  ▶ " } else { marker },
@@ -1404,14 +1464,194 @@ fn saved_comment_box(
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
         ]));
-        for chunk in wrap_comment_body(visible_agent_response(&message.body), content_width) {
-            lines.push(Line::from(vec![
-                Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
-                Span::styled(chunk, Style::default().fg(Color::White)),
-            ]));
+        let body = visible_agent_response(&message.body);
+        if agent_response {
+            append_agent_response(&mut lines, body, content_width);
+        } else {
+            for chunk in wrap_comment_body(body, content_width) {
+                lines.push(Line::from(vec![
+                    Span::styled("  │ ", Style::default().fg(THEME_MUTED)),
+                    Span::styled(chunk, Style::default().fg(THEME_TEXT)),
+                ]));
+            }
         }
     }
     lines
+}
+
+fn append_agent_response(lines: &mut Vec<Line<'static>>, body: &str, width: usize) {
+    for mut response_line in agent_response_lines(body, width) {
+        response_line
+            .spans
+            .insert(0, Span::styled("  │ ", Style::default().fg(THEME_MUTED)));
+        lines.push(response_line);
+    }
+}
+
+fn agent_response_lines(body: &str, width: usize) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut fenced_code = false;
+    for logical_line in body.lines() {
+        let trimmed = logical_line.trim_start();
+        if trimmed.starts_with("```") {
+            fenced_code = !fenced_code;
+            lines.push(Line::from(Span::styled(
+                if fenced_code { "CODE" } else { "END CODE" },
+                Style::default()
+                    .fg(THEME_MUTED)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            continue;
+        }
+        if logical_line.is_empty() {
+            lines.push(Line::default());
+            continue;
+        }
+        if fenced_code {
+            for chunk in wrap_comment_body(logical_line, width) {
+                lines.push(Line::from(Span::styled(
+                    chunk,
+                    Style::default().fg(THEME_TEXT),
+                )));
+            }
+            continue;
+        }
+        if let Some(heading) = trimmed
+            .strip_prefix("### ")
+            .or_else(|| trimmed.strip_prefix("## "))
+            .or_else(|| trimmed.strip_prefix("# "))
+        {
+            for chunk in wrap_comment_body(heading, width) {
+                lines.push(Line::from(Span::styled(
+                    chunk,
+                    Style::default().fg(THEME_TEXT).add_modifier(Modifier::BOLD),
+                )));
+            }
+            continue;
+        }
+        if let Some(body) = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+            .or_else(|| trimmed.strip_prefix("• "))
+        {
+            lines.extend(agent_list_item_lines("• ", body, width));
+            continue;
+        }
+        if let Some((marker, body)) = ordered_list_item(trimmed) {
+            lines.extend(agent_list_item_lines(marker, body, width));
+            continue;
+        }
+        for chunk in wrap_comment_body(logical_line, width) {
+            lines.push(Line::from(inline_agent_spans(&chunk)));
+        }
+    }
+    if lines.is_empty() {
+        lines.push(Line::default());
+    }
+    lines
+}
+
+fn agent_list_item_lines(marker: &str, body: &str, width: usize) -> Vec<Line<'static>> {
+    let marker_width = UnicodeWidthStr::width(marker);
+    let chunks = wrap_comment_body(body, width.saturating_sub(marker_width).max(1));
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(index, chunk)| {
+            let mut spans = vec![Span::styled(
+                if index == 0 {
+                    marker.to_string()
+                } else {
+                    " ".repeat(marker_width)
+                },
+                Style::default()
+                    .fg(THEME_MUTED)
+                    .add_modifier(Modifier::BOLD),
+            )];
+            spans.extend(inline_agent_spans(&chunk));
+            Line::from(spans)
+        })
+        .collect()
+}
+
+fn ordered_list_item(line: &str) -> Option<(&str, &str)> {
+    let digits = line
+        .chars()
+        .take_while(|character| character.is_ascii_digit())
+        .count();
+    if digits == 0 {
+        return None;
+    }
+    let suffix = &line[digits..];
+    if suffix.starts_with(". ") || suffix.starts_with(") ") {
+        Some((&line[..digits + 2], &line[digits + 2..]))
+    } else {
+        None
+    }
+}
+
+fn inline_agent_spans(text: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut remaining = text;
+    while !remaining.is_empty() {
+        if let Some(code) = remaining.strip_prefix('`')
+            && let Some(end) = code.find('`')
+        {
+            spans.push(Span::styled(
+                code[..end].to_string(),
+                Style::default().fg(THEME_TEXT).add_modifier(Modifier::BOLD),
+            ));
+            remaining = &code[end + 1..];
+            continue;
+        }
+        if let Some(bold) = remaining.strip_prefix("**")
+            && let Some(end) = bold.find("**")
+        {
+            spans.push(Span::styled(
+                bold[..end].to_string(),
+                Style::default().fg(THEME_TEXT).add_modifier(Modifier::BOLD),
+            ));
+            remaining = &bold[end + 2..];
+            continue;
+        }
+        let next_markup = [remaining.find('`'), remaining.find("**")]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or(remaining.len());
+        if next_markup == 0 {
+            let character = remaining.chars().next().expect("non-empty response text");
+            push_agent_plain_text(&mut spans, &character.to_string());
+            remaining = &remaining[character.len_utf8()..];
+        } else {
+            push_agent_plain_text(&mut spans, &remaining[..next_markup]);
+            remaining = &remaining[next_markup..];
+        }
+    }
+    spans
+}
+
+fn push_agent_plain_text(spans: &mut Vec<Span<'static>>, text: &str) {
+    for token in text.split_inclusive(char::is_whitespace) {
+        let visible = token.trim_end_matches(char::is_whitespace);
+        let location = visible.rsplit_once(':').is_some_and(|(path, line)| {
+            line.trim_end_matches(|c: char| !c.is_ascii_digit())
+                .parse::<usize>()
+                .is_ok()
+                && (path.contains('/') || path.contains('.'))
+        });
+        spans.push(Span::styled(
+            token.to_string(),
+            if location {
+                Style::default()
+                    .fg(THEME_TEXT)
+                    .add_modifier(Modifier::UNDERLINED)
+            } else {
+                Style::default().fg(THEME_BODY)
+            },
+        ));
+    }
 }
 
 fn wrap_comment_body(body: &str, width: usize) -> Vec<String> {
@@ -1450,7 +1690,7 @@ fn inline_comment_box(
     scope: Option<&str>,
     width: usize,
 ) -> Vec<Line<'static>> {
-    let accent = Style::default().fg(Color::Green);
+    let accent = Style::default().fg(THEME_POSITIVE);
     let input = visible_comment_input(buffer, width);
 
     vec![
@@ -1469,16 +1709,16 @@ fn inline_comment_box(
                     scope.map(|scope| format!(" · {scope}")).unwrap_or_default()
                 ),
                 Style::default()
-                    .fg(Color::Green)
+                    .fg(THEME_POSITIVE)
                     .add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
-            Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
-            Span::styled(input, Style::default().fg(Color::White)),
+            Span::styled("  │ ", Style::default().fg(THEME_MUTED)),
+            Span::styled(input, Style::default().fg(THEME_TEXT)),
         ]),
         Line::from(vec![
-            Span::styled("  └ ", Style::default().fg(Color::DarkGray)),
+            Span::styled("  └ ", Style::default().fg(THEME_MUTED)),
             Span::styled(
                 if editing {
                     "Enter update · Esc cancel"
@@ -1487,7 +1727,7 @@ fn inline_comment_box(
                 } else {
                     "Enter save · then S send · Esc cancel"
                 },
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(THEME_MUTED),
             ),
         ]),
     ]
@@ -1594,12 +1834,24 @@ fn diff_line(
     if selected {
         rendered = rendered.style(
             Style::default()
-                .fg(Color::White)
-                .bg(Color::Green)
+                .fg(THEME_TEXT)
+                .bg(THEME_SELECTION_BACKGROUND)
                 .add_modifier(Modifier::BOLD),
         );
         rendered.push_span(Span::raw(
             " ".repeat(viewport_width.saturating_sub(rendered.width())),
+        ));
+    } else if line.starts_with('+') && !line.starts_with("+++") {
+        rendered = rendered.style(Style::default().bg(ADDED_LINE_BACKGROUND));
+        rendered.push_span(Span::styled(
+            " ".repeat(viewport_width.saturating_sub(rendered.width())),
+            Style::default().bg(ADDED_LINE_BACKGROUND),
+        ));
+    } else if line.starts_with('-') && !line.starts_with("---") {
+        rendered = rendered.style(Style::default().bg(REMOVED_LINE_BACKGROUND));
+        rendered.push_span(Span::styled(
+            " ".repeat(viewport_width.saturating_sub(rendered.width())),
+            Style::default().bg(REMOVED_LINE_BACKGROUND),
         ));
     }
     rendered
@@ -1608,27 +1860,27 @@ fn diff_line(
 fn diff_line_style(line: &str) -> Style {
     if line.starts_with("diff --git ") {
         Style::default()
-            .fg(Color::Yellow)
+            .fg(THEME_WARNING)
             .add_modifier(Modifier::BOLD)
     } else if line.starts_with("@@") {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(THEME_ACCENT)
     } else if line.starts_with("+++") {
-        Style::default().fg(Color::Green)
+        Style::default().fg(DIFF_ADDED_MARKER)
     } else if line.starts_with("---") {
-        Style::default().fg(Color::Red)
+        Style::default().fg(DIFF_REMOVED_MARKER)
     } else if line.starts_with('+') {
-        Style::default().fg(Color::Green)
+        Style::default().fg(DIFF_ADDED_MARKER)
     } else if line.starts_with('-') {
-        Style::default().fg(Color::Red)
+        Style::default().fg(DIFF_REMOVED_MARKER)
     } else if line.starts_with("index ")
         || line.starts_with("new file mode ")
         || line.starts_with("deleted file mode ")
         || line.starts_with("similarity index ")
     {
-        Style::default().fg(Color::Blue)
+        Style::default().fg(THEME_COOL)
     } else if line.starts_with("commit ") {
         Style::default()
-            .fg(Color::Yellow)
+            .fg(THEME_WARNING)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
@@ -1653,11 +1905,12 @@ fn highlighted_code_line(
     };
     let code_start = marker.len_utf8();
     let code_base = if selected {
-        Style::default().fg(Color::White)
+        Style::default().fg(THEME_TEXT)
     } else {
-        base
+        Style::default()
     };
-    let mut spans = vec![Span::styled(marker.to_string(), code_base)];
+    let marker_style = if selected { code_base } else { base };
+    let mut spans = vec![Span::styled(marker.to_string(), marker_style)];
     spans.extend(highlight_code(&line[code_start..], language, code_base));
     Line::from(spans)
 }
@@ -1674,7 +1927,7 @@ fn highlight_code(code: &str, language: Option<SyntaxLanguage>, base: Style) -> 
             spans.push(Span::styled(
                 rest.to_string(),
                 Style::default()
-                    .fg(Color::DarkGray)
+                    .fg(THEME_MUTED)
                     .add_modifier(Modifier::ITALIC),
             ));
             break;
@@ -1692,7 +1945,7 @@ fn highlight_code(code: &str, language: Option<SyntaxLanguage>, base: Style) -> 
             spans.push(Span::styled(
                 rest[..length].to_string(),
                 Style::default()
-                    .fg(Color::DarkGray)
+                    .fg(THEME_MUTED)
                     .add_modifier(Modifier::ITALIC),
             ));
             cursor += length;
@@ -1703,7 +1956,7 @@ fn highlight_code(code: &str, language: Option<SyntaxLanguage>, base: Style) -> 
             let length = quoted_token_len(rest, character);
             spans.push(Span::styled(
                 rest[..length].to_string(),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(THEME_WARNING),
             ));
             cursor += length;
             continue;
@@ -1719,7 +1972,7 @@ fn highlight_code(code: &str, language: Option<SyntaxLanguage>, base: Style) -> 
                 .unwrap_or(character.len_utf8());
             spans.push(Span::styled(
                 rest[..length].to_string(),
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(THEME_ACCENT),
             ));
             cursor += length;
             continue;
@@ -1735,14 +1988,14 @@ fn highlight_code(code: &str, language: Option<SyntaxLanguage>, base: Style) -> 
             let following = rest[length..].trim_start();
             let style = if is_keyword(token, language) {
                 Style::default()
-                    .fg(Color::Magenta)
+                    .fg(THEME_SECONDARY)
                     .add_modifier(Modifier::BOLD)
             } else if is_builtin_type(token, language)
                 || token.chars().next().is_some_and(char::is_uppercase)
             {
-                Style::default().fg(Color::LightBlue)
+                Style::default().fg(THEME_TYPE)
             } else if following.starts_with('(') {
-                Style::default().fg(Color::Cyan)
+                Style::default().fg(THEME_ACCENT)
             } else {
                 base
             };
@@ -2031,8 +2284,8 @@ fn history_line(
         let mut rendered = Line::styled(
             line.display_text(author_width),
             Style::default()
-                .fg(Color::White)
-                .bg(Color::Green)
+                .fg(THEME_TEXT)
+                .bg(THEME_SELECTION_BACKGROUND)
                 .add_modifier(Modifier::BOLD),
         );
         let padding = viewport_width.saturating_sub(rendered.width());
@@ -2043,16 +2296,16 @@ fn history_line(
     let HistoryLine::Commit(commit) = line else {
         return Line::styled(
             line.display_text(author_width),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(THEME_MUTED),
         );
     };
 
     let mut spans = vec![
-        Span::styled(commit.date.clone(), Style::default().fg(Color::Blue)),
+        Span::styled(commit.date.clone(), Style::default().fg(THEME_COOL)),
         Span::raw(" "),
         Span::styled(
             fit_column(&commit.author, author_width),
-            Style::default().fg(Color::Green),
+            Style::default().fg(THEME_POSITIVE),
         ),
         Span::raw(" "),
     ];
@@ -2079,12 +2332,12 @@ fn history_line(
 
 fn graph_spans(commit: &CommitLine) -> Vec<Span<'static>> {
     const LANE_COLORS: [Color; 6] = [
-        Color::Magenta,
-        Color::Yellow,
-        Color::Cyan,
-        Color::Green,
-        Color::White,
-        Color::Red,
+        THEME_SECONDARY,
+        THEME_WARNING,
+        THEME_ACCENT,
+        THEME_POSITIVE,
+        THEME_TEXT,
+        THEME_NEGATIVE,
     ];
 
     commit
@@ -2106,7 +2359,7 @@ fn graph_spans(commit: &CommitLine) -> Vec<Span<'static>> {
             };
             Span::styled(
                 character.to_string(),
-                Style::default().fg(color.unwrap_or(Color::Blue)),
+                Style::default().fg(color.unwrap_or(THEME_COOL)),
             )
         })
         .collect()
@@ -2117,11 +2370,11 @@ fn ref_color(refs: &str) -> Color {
         .split(", ")
         .any(|reference| reference.starts_with("tag: "))
     {
-        Color::Magenta
+        THEME_SECONDARY
     } else if refs.split(", ").any(|reference| reference.contains('/')) {
-        Color::Yellow
+        THEME_WARNING
     } else {
-        Color::Cyan
+        THEME_ACCENT
     }
 }
 
@@ -2161,13 +2414,13 @@ mod tests {
 
         let rendered = history_line(&line, 8, false, 100);
 
-        assert_eq!(rendered.spans[0].style.fg, Some(Color::Blue));
-        assert_eq!(rendered.spans[2].style.fg, Some(Color::Green));
+        assert_eq!(rendered.spans[0].style.fg, Some(THEME_COOL));
+        assert_eq!(rendered.spans[2].style.fg, Some(THEME_POSITIVE));
         assert!(
             rendered
                 .spans
                 .iter()
-                .any(|span| span.style.fg == Some(Color::Cyan))
+                .any(|span| span.style.fg == Some(THEME_ACCENT))
         );
     }
 
@@ -2179,25 +2432,27 @@ mod tests {
 
         let rendered = history_line(&line, 8, true, 100);
 
-        assert_eq!(rendered.style.fg, Some(Color::White));
-        assert_eq!(rendered.style.bg, Some(Color::Green));
+        assert_eq!(rendered.style.fg, Some(THEME_TEXT));
+        assert_eq!(rendered.style.bg, Some(THEME_SELECTION_BACKGROUND));
         assert!(rendered.style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(rendered.width(), 100);
     }
 
     #[test]
     fn diff_lines_use_semantic_colors() {
-        assert_eq!(
-            diff_line("+added", false, 80, None).spans[0].style.fg,
-            Some(Color::Green)
-        );
-        assert_eq!(
-            diff_line("-removed", false, 80, None).spans[0].style.fg,
-            Some(Color::Red)
-        );
+        let added = diff_line("+added", false, 80, None);
+        let removed = diff_line("-removed", false, 80, None);
+        assert_eq!(added.spans[0].style.fg, Some(DIFF_ADDED_MARKER));
+        assert_eq!(removed.spans[0].style.fg, Some(DIFF_REMOVED_MARKER));
+        assert_eq!(added.spans[1].style.fg, None);
+        assert_eq!(removed.spans[1].style.fg, None);
+        assert_eq!(added.style.bg, Some(ADDED_LINE_BACKGROUND));
+        assert_eq!(removed.style.bg, Some(REMOVED_LINE_BACKGROUND));
+        assert_eq!(added.width(), 80);
+        assert_eq!(removed.width(), 80);
         assert_eq!(
             diff_line("@@ -1 +1 @@", false, 80, None).style.fg,
-            Some(Color::Cyan)
+            Some(THEME_ACCENT)
         );
     }
 
@@ -2205,7 +2460,7 @@ mod tests {
     fn selected_diff_line_fills_the_viewport() {
         let rendered = diff_line("+added", true, 80, None);
 
-        assert_eq!(rendered.style.bg, Some(Color::Green));
+        assert_eq!(rendered.style.bg, Some(THEME_SELECTION_BACKGROUND));
         assert_eq!(rendered.width(), 80);
     }
 
@@ -2223,12 +2478,12 @@ mod tests {
             .map(|span| (span.content.as_ref(), span.style.fg))
             .collect::<Vec<_>>();
 
-        assert!(styled.contains(&("pub", Some(Color::Magenta))));
-        assert!(styled.contains(&("fn", Some(Color::Magenta))));
-        assert!(styled.contains(&("answer", Some(Color::Cyan))));
-        assert!(styled.contains(&("usize", Some(Color::LightBlue))));
-        assert!(styled.contains(&("42", Some(Color::Cyan))));
-        assert!(styled.contains(&("// result", Some(Color::DarkGray))));
+        assert!(styled.contains(&("pub", Some(THEME_SECONDARY))));
+        assert!(styled.contains(&("fn", Some(THEME_SECONDARY))));
+        assert!(styled.contains(&("answer", Some(THEME_ACCENT))));
+        assert!(styled.contains(&("usize", Some(THEME_TYPE))));
+        assert!(styled.contains(&("42", Some(THEME_ACCENT))));
+        assert!(styled.contains(&("// result", Some(THEME_MUTED))));
     }
 
     #[test]
@@ -2263,8 +2518,11 @@ mod tests {
                 bookmarked: false,
                 symbol: Some((4, 10)),
             },
-            0,
-            40,
+            SourceViewport {
+                syntax: Some(SyntaxLanguage::Rust),
+                horizontal_scroll: 0,
+                width: 40,
+            },
         );
 
         assert!(rendered.to_string().contains("  12 │ let answer = 42;"));
@@ -2272,7 +2530,7 @@ mod tests {
             rendered
                 .spans
                 .iter()
-                .any(|span| span.style.bg == Some(Color::Yellow))
+                .any(|span| span.style.bg == Some(THEME_SYMBOL_BACKGROUND))
         );
         assert_eq!(rendered.width(), 40);
     }
@@ -2289,12 +2547,23 @@ mod tests {
                 bookmarked: false,
                 symbol: None,
             },
-            0,
-            40,
+            SourceViewport {
+                syntax: Some(SyntaxLanguage::Rust),
+                horizontal_scroll: 0,
+                width: 40,
+            },
         );
 
         assert!(rendered.to_string().starts_with("+  12 │"));
-        assert_eq!(rendered.spans[0].style.fg, Some(Color::Green));
+        assert_eq!(rendered.spans[0].style.fg, Some(DIFF_ADDED_MARKER));
+        assert_eq!(rendered.style.bg, Some(ADDED_LINE_BACKGROUND));
+        assert_eq!(rendered.width(), 40);
+        let identifier = rendered
+            .spans
+            .iter()
+            .find(|span| span.content.contains("answer"))
+            .expect("identifier should remain in a neutral syntax span");
+        assert_eq!(identifier.style.fg, None);
     }
 
     #[test]
@@ -2309,12 +2578,15 @@ mod tests {
                 bookmarked: true,
                 symbol: None,
             },
-            0,
-            40,
+            SourceViewport {
+                syntax: Some(SyntaxLanguage::Rust),
+                horizontal_scroll: 0,
+                width: 40,
+            },
         );
 
         assert!(rendered.to_string().starts_with(" ◆ 12 │"));
-        assert_eq!(rendered.spans[1].style.fg, Some(Color::Cyan));
+        assert_eq!(rendered.spans[1].style.fg, Some(THEME_ACCENT));
     }
 
     #[test]
@@ -2329,13 +2601,44 @@ mod tests {
                 bookmarked: false,
                 symbol: None,
             },
-            0,
-            40,
+            SourceViewport {
+                syntax: Some(SyntaxLanguage::Rust),
+                horizontal_scroll: 0,
+                width: 40,
+            },
         );
 
         assert_eq!(rendered.style.bg, None);
-        assert_eq!(rendered.spans[0].style.bg, Some(Color::DarkGray));
+        assert_eq!(rendered.spans[0].style.bg, Some(THEME_RANGE_BACKGROUND));
         assert_eq!(rendered.width(), 40);
+    }
+
+    #[test]
+    fn context_source_keeps_syntax_colors_under_cursor_background() {
+        let rendered = source_line(
+            12,
+            "let answer = 42;",
+            3,
+            SourceSelection::Cursor,
+            SourceGutter {
+                changed_side: None,
+                bookmarked: false,
+                symbol: None,
+            },
+            SourceViewport {
+                syntax: Some(SyntaxLanguage::Rust),
+                horizontal_scroll: 0,
+                width: 40,
+            },
+        );
+
+        let keyword = rendered
+            .spans
+            .iter()
+            .find(|span| span.content == "let")
+            .expect("Rust keyword should be a separate highlighted span");
+        assert_eq!(keyword.style.fg, Some(THEME_SECONDARY));
+        assert_eq!(keyword.style.bg, Some(THEME_SELECTION_BACKGROUND));
     }
 
     #[test]
@@ -2392,11 +2695,13 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(text.contains("YOU ASKED"));
+        assert!(text.contains("QUESTION"));
         assert!(text.contains("Why retry here?"));
-        assert!(text.contains("AGENT · codex:session-1"));
+        assert!(text.contains("LATEST ANSWER · codex:session-1"));
         assert!(text.contains("shared request boundary"));
-        assert!(text.contains("READ 1 · Client::send · src/client.rs:42"));
+        assert!(text.contains("READING TRAIL ABOVE · 1 location(s)"));
+        assert!(text.contains("1 earlier response(s) hidden"));
+        assert!(!text.contains("READ 1"));
     }
 
     #[test]
@@ -2413,12 +2718,12 @@ mod tests {
             references: Vec::new(),
         };
 
-        let first = understanding_thread_box(&thread, 1, 60, 0)
+        let first = understanding_thread_box(&thread, 0, 60, 0)
             .iter()
             .map(Line::to_string)
             .collect::<Vec<_>>()
             .join("\n");
-        let third = understanding_thread_box(&thread, 1, 60, 2)
+        let third = understanding_thread_box(&thread, 0, 60, 2)
             .iter()
             .map(Line::to_string)
             .collect::<Vec<_>>()
@@ -2565,6 +2870,42 @@ mod tests {
         assert!(text.contains("AGENT · codex:session-1"));
         assert!(text.contains("Implemented."));
         assert!(text.contains("Tests pass."));
+    }
+
+    #[test]
+    fn agent_response_uses_visual_hierarchy() {
+        let rendered = agent_response_lines(
+            "# Result\n- Call `parse` at src/parser.rs:12\n1. Verify behavior\n```rust\nlet value = 42;\n```",
+            60,
+        );
+        let spans = rendered
+            .iter()
+            .flat_map(|line| &line.spans)
+            .collect::<Vec<_>>();
+
+        assert!(spans.iter().any(|span| {
+            span.content == "Result"
+                && span.style.fg == Some(THEME_TEXT)
+                && span.style.add_modifier.contains(Modifier::BOLD)
+        }));
+        assert!(
+            spans
+                .iter()
+                .any(|span| { span.content == "• " && span.style.fg == Some(THEME_MUTED) })
+        );
+        assert!(spans.iter().any(|span| {
+            span.content == "parse"
+                && span.style.fg == Some(THEME_TEXT)
+                && span.style.add_modifier.contains(Modifier::BOLD)
+        }));
+        assert!(spans.iter().any(|span| {
+            span.content.contains("src/parser.rs:12")
+                && span.style.fg == Some(THEME_TEXT)
+                && span.style.add_modifier.contains(Modifier::UNDERLINED)
+        }));
+        assert!(spans.iter().any(|span| {
+            span.content == "let value = 42;" && span.style.fg == Some(THEME_TEXT)
+        }));
     }
 
     #[test]

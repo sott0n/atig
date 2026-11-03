@@ -206,6 +206,12 @@ pub struct UnderstandingThread {
     pub references: Vec<AgentReadingPoint>,
 }
 
+impl UnderstandingThread {
+    pub fn is_guided_reading(&self) -> bool {
+        self.question == GUIDED_READING_QUESTION
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchPurpose {
     Review,
@@ -1968,7 +1974,12 @@ impl App {
             self.delivery_message = Some(self.message.clone());
             return;
         }
-        let previous = self.understanding_threads_for_range(line, end_line);
+        let guided_reading = question == GUIDED_READING_QUESTION;
+        let previous = if guided_reading {
+            Vec::new()
+        } else {
+            self.understanding_threads_for_range(line, end_line)
+        };
         let prompt = format_understanding_request(
             &self.context_path,
             line,
@@ -1977,6 +1988,16 @@ impl App {
             &self.context_lines,
             &previous,
         );
+        if guided_reading {
+            self.understanding_threads.retain(|thread| {
+                !(thread.source == source
+                    && thread.version == self.context_version
+                    && thread.file == self.context_path
+                    && thread.line == line
+                    && thread.end_line.unwrap_or(thread.line) == end_line
+                    && thread.is_guided_reading())
+            });
+        }
         let thread_index = self.understanding_threads.len();
         self.understanding_threads.push(UnderstandingThread {
             source,
@@ -2090,6 +2111,17 @@ impl App {
                     && thread.line == line
             })
             .collect()
+    }
+
+    pub fn latest_understanding_thread_at_context(
+        &self,
+        line: usize,
+    ) -> Option<(&UnderstandingThread, usize)> {
+        let threads = self.understanding_threads_at_context(line);
+        threads
+            .last()
+            .copied()
+            .map(|latest| (latest, threads.len().saturating_sub(1)))
     }
 
     fn understanding_threads_covering_context(&self, line: usize) -> Vec<&UnderstandingThread> {
@@ -4529,6 +4561,33 @@ mod tests {
         assert!(prompt.contains("question-1"));
         assert!(prompt.contains("answer-6"));
         assert!(prompt.contains("Current question: one more question"));
+    }
+
+    #[test]
+    fn context_shows_only_the_latest_answer_and_counts_earlier_responses() {
+        let mut app = App::new();
+        app.diff_source = Some(git::DiffSource::Worktree);
+        app.context_version = "WORKTREE".into();
+        app.context_path = "src/main.rs".into();
+        app.understanding_threads = (1..=3)
+            .map(|turn| UnderstandingThread {
+                source: "WORKTREE".into(),
+                version: "WORKTREE".into(),
+                file: "src/main.rs".into(),
+                line: 12,
+                end_line: None,
+                question: format!("question {turn}"),
+                agent: "codex:session-1".into(),
+                answer: Some(format!("answer {turn}")),
+                references: Vec::new(),
+            })
+            .collect();
+
+        let (latest, hidden) = app
+            .latest_understanding_thread_at_context(12)
+            .expect("latest response");
+        assert_eq!(latest.answer.as_deref(), Some("answer 3"));
+        assert_eq!(hidden, 2);
     }
 
     #[test]
